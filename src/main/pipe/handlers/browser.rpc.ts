@@ -88,6 +88,43 @@ export function registerBrowserRpc(router: RpcRouter, getWindow: GetWindow, webv
     });
   });
 
+  /**
+   * browser.goBack
+   * Navigate the active browser Surface back by one history entry.
+   * params: { surfaceId?: string }
+   */
+  router.register('browser.goBack', async (params) => {
+    const surfaceId = typeof params['surfaceId'] === 'string' ? params['surfaceId'] : undefined;
+
+    const target = webviewCdpManager.getTarget(surfaceId);
+    if (!target) throw new Error('browser.goBack: no webview target registered');
+
+    const wc = webContents.fromId(target.webContentsId);
+    if (!wc || wc.isDestroyed()) throw new Error('browser.goBack: WebContents unavailable');
+
+    const navigationHistory = (wc as Electron.WebContents & {
+      navigationHistory?: {
+        canGoBack?: () => boolean;
+        goBack?: () => void;
+      };
+      canGoBack?: () => boolean;
+      goBack?: () => void;
+    }).navigationHistory;
+
+    const canGoBack = navigationHistory?.canGoBack?.() ?? wc.canGoBack?.() ?? false;
+    if (!canGoBack) {
+      return { ok: false, reason: 'no history entry' };
+    }
+
+    if (navigationHistory?.goBack) {
+      navigationHistory.goBack();
+    } else {
+      wc.goBack();
+    }
+
+    return { ok: true };
+  });
+
   // ── Session handlers ────────────────────────────────────────────────────
 
   /**
@@ -186,7 +223,7 @@ export function registerBrowserRpc(router: RpcRouter, getWindow: GetWindow, webv
 
   /**
    * browser.cdp.info
-   * Returns the CDP port and all registered webview targets.
+   * Returns the CDP port and minimal target metadata required for Playwright attachment.
    * params: none
    */
   router.register('browser.cdp.info', async () => {
@@ -204,33 +241,9 @@ export function registerBrowserRpc(router: RpcRouter, getWindow: GetWindow, webv
       cdpPort,
       targets: targets.map((t) => ({
         surfaceId: t.surfaceId,
-        webContentsId: t.webContentsId,
         targetId: t.targetId,
-        wsUrl: t.wsUrl,  // Internal use only — needed by PlaywrightEngine to connect to webview
       })),
     };
-  });
-
-  /**
-   * browser.cdp.send
-   * Proxy any CDP command to the webview via webContents.debugger.
-   * params: { method: string, params?: object, surfaceId?: string }
-   */
-  router.register('browser.cdp.send', async (params) => {
-    const method = typeof params['method'] === 'string' ? params['method'] : '';
-    if (!method) throw new Error('browser.cdp.send: missing "method"');
-    const cdpParams = (typeof params['params'] === 'object' && params['params'] !== null)
-      ? params['params'] as Record<string, unknown>
-      : {};
-    const surfaceId = typeof params['surfaceId'] === 'string' ? params['surfaceId'] : undefined;
-
-    const target = webviewCdpManager.getTarget(surfaceId);
-    if (!target) throw new Error('browser.cdp.send: no webview target registered');
-
-    const wc = webContents.fromId(target.webContentsId);
-    if (!wc || wc.isDestroyed()) throw new Error('browser.cdp.send: WebContents unavailable');
-
-    return await wc.debugger.sendCommand(method, cdpParams);
   });
 
   /**

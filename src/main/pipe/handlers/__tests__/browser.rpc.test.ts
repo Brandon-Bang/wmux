@@ -1,0 +1,87 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { BrowserWindow } from 'electron';
+import { RpcRouter } from '../../RpcRouter';
+import { registerBrowserRpc } from '../browser.rpc';
+
+const mockWebContents = {
+  isDestroyed: vi.fn(() => false),
+  canGoBack: vi.fn(() => true),
+  goBack: vi.fn(),
+  debugger: {
+    sendCommand: vi.fn(),
+  },
+};
+
+vi.mock('electron', () => ({
+  webContents: {
+    fromId: vi.fn(() => mockWebContents),
+  },
+}));
+
+describe('registerBrowserRpc', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockWebContents.isDestroyed.mockReturnValue(false);
+    mockWebContents.canGoBack.mockReturnValue(true);
+  });
+
+  function register(): RpcRouter {
+    const router = new RpcRouter();
+    const webviewCdpManager = {
+      getTarget: vi.fn(() => ({ surfaceId: 'surface-1', webContentsId: 42, targetId: 'target-1', wsUrl: 'ws://127.0.0.1/devtools/page/target-1' })),
+      listTargets: vi.fn(() => [{ surfaceId: 'surface-1', webContentsId: 42, targetId: 'target-1', wsUrl: 'ws://127.0.0.1/devtools/page/target-1' }]),
+      getCdpPort: vi.fn(() => 18800),
+      waitForTarget: vi.fn(),
+    };
+
+    registerBrowserRpc(router, (() => null) as () => BrowserWindow | null, webviewCdpManager as never);
+    return router;
+  }
+
+  it('does not expose browser.cdp.send through the RPC router', async () => {
+    const router = register();
+
+    const response = await router.dispatch({
+      id: '1',
+      method: 'browser.cdp.send' as never,
+      params: { method: 'Page.navigate' },
+    });
+
+    expect(response.ok).toBe(false);
+    if (!response.ok) {
+      expect(response.error).toContain('Unknown method: browser.cdp.send');
+    }
+  });
+
+  it('browser.goBack uses the reviewed navigation method instead of raw CDP', async () => {
+    const router = register();
+
+    const response = await router.dispatch({
+      id: '2',
+      method: 'browser.goBack',
+      params: {},
+    });
+
+    expect(response.ok).toBe(true);
+    expect(mockWebContents.goBack).toHaveBeenCalledTimes(1);
+    expect(mockWebContents.debugger.sendCommand).not.toHaveBeenCalled();
+  });
+
+  it('browser.cdp.info only returns minimal target metadata', async () => {
+    const router = register();
+
+    const response = await router.dispatch({
+      id: '3',
+      method: 'browser.cdp.info',
+      params: {},
+    });
+
+    expect(response.ok).toBe(true);
+    if (response.ok) {
+      expect(response.result).toEqual({
+        cdpPort: 18800,
+        targets: [{ surfaceId: 'surface-1', targetId: 'target-1' }],
+      });
+    }
+  });
+});

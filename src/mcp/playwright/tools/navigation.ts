@@ -67,18 +67,11 @@ export function registerNavigationTools(server: McpServer): void {
     },
     async ({ surfaceId }) => {
       try {
-        // Use CDP via RPC for reliability
-        await sendRpc('browser.cdp.send', {
-          method: 'Page.navigateToHistoryEntry',
-          params: {},
+        await sendRpc('browser.goBack', {
           ...(surfaceId && { surfaceId }),
-        }).catch(() => {
-          // Fallback: use history navigation via JS evaluation
-          return sendRpc('browser.evaluate', {
-            expression: 'history.back()',
-            ...(surfaceId && { surfaceId }),
-          });
         });
+
+        await new Promise((resolve) => setTimeout(resolve, 300));
 
         // Get current URL
         const urlResult = await sendRpc('browser.evaluate', {

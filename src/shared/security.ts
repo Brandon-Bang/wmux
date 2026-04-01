@@ -21,6 +21,13 @@ export function secureWriteTokenFile(filePath: string, token: string): void {
       ], { windowsHide: true });
     } catch (aclErr) {
       console.warn('[secureWriteTokenFile] Could not set file ACL:', aclErr);
+      try {
+        fs.unlinkSync(filePath);
+      } catch {
+        // Best effort cleanup of an insecure token file.
+      }
+      const message = aclErr instanceof Error ? aclErr.message : String(aclErr);
+      throw new Error(`Failed to set secure ACL on ${filePath}: ${message}`);
     }
   }
 }

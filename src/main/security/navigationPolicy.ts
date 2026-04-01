@@ -36,7 +36,21 @@ function validateIpv4Address(address: string): ValidationResult {
 }
 
 function expandIpv6Address(address: string): string[] | null {
-  const normalized = address.toLowerCase();
+  let normalized = address.toLowerCase();
+  const lastColon = normalized.lastIndexOf(':');
+  if (normalized.includes('.') && lastColon !== -1) {
+    const embeddedIpv4 = normalized.slice(lastColon + 1);
+    const ipv4Validation = validateIpv4Address(embeddedIpv4);
+    if (ipv4Validation.reason?.startsWith('Invalid IPv4 address:')) {
+      return null;
+    }
+
+    const octets = embeddedIpv4.split('.').map((part) => Number.parseInt(part, 10));
+    const hi = ((octets[0] << 8) | octets[1]).toString(16);
+    const lo = ((octets[2] << 8) | octets[3]).toString(16);
+    normalized = `${normalized.slice(0, lastColon)}:${hi}:${lo}`;
+  }
+
   const [head, tail] = normalized.split('::');
 
   if (normalized.split('::').length > 2) return null;
@@ -66,6 +80,13 @@ function validateIpv6Address(address: string): ValidationResult {
   const expanded = expandIpv6Address(address);
   if (!expanded) {
     return { valid: false, reason: `Invalid IPv6 address: ${address}` };
+  }
+
+  if (expanded.slice(0, 5).every((group) => group === '0000') && expanded[5] === 'ffff') {
+    const hi = Number.parseInt(expanded[6], 16);
+    const lo = Number.parseInt(expanded[7], 16);
+    const ipv4 = `${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`;
+    return validateIpv4Address(ipv4);
   }
 
   const compact = expanded.join(':');

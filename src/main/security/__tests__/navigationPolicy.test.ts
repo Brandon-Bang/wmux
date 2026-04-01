@@ -63,4 +63,13 @@ describe('validateResolvedNavigationUrl', () => {
       reason: 'Blocked resolved address fd12:3456:789a::1: Blocked private IPv6 address (fc00::/7)',
     });
   });
+
+  it('blocks IPv6-mapped IPv4 targets after hostname resolution', async () => {
+    lookupMock.mockResolvedValue([{ address: '::ffff:169.254.169.254', family: 6 }]);
+
+    await expect(validateResolvedNavigationUrl('https://mapped-ipv4.example')).resolves.toEqual({
+      valid: false,
+      reason: 'Blocked resolved address ::ffff:169.254.169.254: Blocked link-local/cloud metadata address (169.254.0.0/16)',
+    });
+  });
 });

@@ -5,6 +5,7 @@ const fsMock = vi.hoisted(() => ({
   existsSync: vi.fn(),
   mkdirSync: vi.fn(),
   writeFileSync: vi.fn(),
+  unlinkSync: vi.fn(),
 }));
 
 const execFileSyncMock = vi.hoisted(() => vi.fn());
@@ -13,6 +14,7 @@ vi.mock('fs', () => ({
   existsSync: fsMock.existsSync,
   mkdirSync: fsMock.mkdirSync,
   writeFileSync: fsMock.writeFileSync,
+  unlinkSync: fsMock.unlinkSync,
 }));
 
 vi.mock('child_process', () => ({
@@ -56,5 +58,22 @@ describe('secureWriteTokenFile', () => {
       [tokenPath, '/inheritance:r', '/grant:r', 'tester:F'],
       { windowsHide: true },
     );
+  });
+
+  it('deletes the token file and throws when Windows ACL hardening fails', async () => {
+    vi.stubEnv('USERNAME', 'tester');
+    vi.stubEnv('SystemRoot', 'C:\\Windows');
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    execFileSyncMock.mockImplementation(() => {
+      throw new Error('icacls failed');
+    });
+
+    const { secureWriteTokenFile } = await import('../security');
+    const tokenPath = path.join('C:', 'Users', 'tester', '.wmux-auth-token');
+
+    expect(() => secureWriteTokenFile(tokenPath, 'secret-token')).toThrow(
+      `Failed to set secure ACL on ${tokenPath}: icacls failed`,
+    );
+    expect(fsMock.unlinkSync).toHaveBeenCalledWith(tokenPath);
   });
 });

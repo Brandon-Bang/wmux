@@ -1,3 +1,37 @@
+// === Company Mode Types (canonical source: src/company/types.ts) ===
+import type {
+  AgentPreset as _AgentPreset,
+  MemberStatus as _MemberStatus,
+  TeamMember as _TeamMember,
+  Department as _Department,
+  Company as _Company,
+  CompanyTemplateMember as _CompanyTemplateMember,
+  CompanyTemplateDepartment as _CompanyTemplateDepartment,
+  CompanyTemplate as _CompanyTemplate,
+  WorktreeInfo as _WorktreeInfo,
+  RiskLevel as _RiskLevel,
+  ApprovalRequest as _ApprovalRequest,
+  MessageRouteEvent as _MessageRouteEvent,
+  InboxMessage as _InboxMessage,
+} from '../company/types';
+import { MAX_INBOX_SIZE as _MAX_INBOX_SIZE } from '../company/types';
+
+// Re-export for backward compatibility
+export type AgentPreset = _AgentPreset;
+export type MemberStatus = _MemberStatus;
+export type TeamMember = _TeamMember;
+export type Department = _Department;
+export type Company = _Company;
+export type CompanyTemplateMember = _CompanyTemplateMember;
+export type CompanyTemplateDepartment = _CompanyTemplateDepartment;
+export type CompanyTemplate = _CompanyTemplate;
+export type WorktreeInfo = _WorktreeInfo;
+export type RiskLevel = _RiskLevel;
+export type ApprovalRequest = _ApprovalRequest;
+export type MessageRouteEvent = _MessageRouteEvent;
+export type InboxMessage = _InboxMessage;
+export const MAX_INBOX_SIZE = _MAX_INBOX_SIZE;
+
 // === Surface: a single terminal instance within a Pane ===
 export interface Surface {
   id: string;
@@ -38,6 +72,7 @@ export interface Workspace {
   activePaneId: string;
   metadata?: WorkspaceMetadata;
   companyRole?: 'ceo' | 'lead' | 'member';
+  companyDeptName?: string;
 }
 
 // === Notification ===
@@ -455,137 +490,4 @@ export function validateNavigationUrl(url: string): { valid: boolean; reason?: s
 
   return { valid: true };
 }
-
-// === Company Mode Types ===
-
-export type AgentPreset =
-  // Engineering
-  | 'software-architect' | 'backend-architect' | 'frontend-developer' | 'senior-developer'
-  | 'ai-engineer' | 'data-engineer' | 'database-optimizer' | 'devops-automator' | 'sre'
-  | 'security-engineer' | 'code-reviewer' | 'technical-writer'
-  | 'database-architect' | 'security-auditor' | 'test-automator'
-  | 'deployment-engineer' | 'devops-engineer'
-  // Design
-  | 'ui-designer' | 'ux-architect' | 'ux-researcher'
-  | 'brand-guardian' | 'visual-storyteller' | 'image-prompt-engineer'
-  | 'design-system-architect'
-  // Project Management
-  | 'studio-producer' | 'project-shepherd' | 'studio-operations'
-  | 'senior-project-manager' | 'experiment-tracker'
-  | 'project-manager'
-  // Testing
-  | 'accessibility-auditor' | 'api-tester' | 'performance-benchmarker'
-  | 'test-results-analyzer' | 'workflow-optimizer' | 'reality-checker'
-  // Sales
-  | 'sales-coach' | 'account-strategist' | 'deal-strategist'
-  | 'outbound-strategist' | 'pipeline-analyst' | 'sales-engineer'
-  // Marketing
-  | 'seo-specialist' | 'content-creator' | 'growth-hacker'
-  | 'podcast-strategist' | 'linkedin-strategist' | 'tiktok-strategist'
-  | 'content-strategist' | 'social-media-manager'
-  // Product
-  | 'product-manager' | 'feedback-synthesizer' | 'feature-prioritizer' | 'roadmap-strategist'
-  // Specialized
-  | 'agents-orchestrator' | 'workflow-architect' | 'mcp-builder'
-  | 'compliance-auditor' | 'developer-advocate' | 'recruitment-specialist'
-  // Custom
-  | 'custom';
-
-export type MemberStatus = 'idle' | 'running' | 'complete' | 'error' | 'waiting' | 'stuck';
-
-export interface TeamMember {
-  id: string;
-  name: string;
-  preset: AgentPreset;
-  customAgentPath?: string;
-  workspaceId: string;
-  ptyId?: string;
-  status: MemberStatus;
-  lastMessage?: string;
-  lastActivity?: number;
-}
-
-export interface Department {
-  id: string;
-  name: string;
-  leadId: string;
-  members: TeamMember[];
-  worktreeBranch?: string;
-}
-
-export interface Company {
-  id: string;
-  name: string;
-  ceoWorkspaceId?: string;
-  departments: Department[];
-  createdAt: number;
-  totalCostEstimate?: number;
-  skipPermissions?: boolean;
-  workDir?: string;
-}
-
-// Company Templates
-export interface CompanyTemplateMember {
-  name: string;
-  preset: AgentPreset;
-  customAgentPath?: string;
-}
-
-export interface CompanyTemplateDepartment {
-  name: string;
-  leadName: string;
-  leadPrompt?: string;
-  worktreeBranch?: string;
-  members: CompanyTemplateMember[];
-}
-
-export interface CompanyTemplate {
-  name: string;
-  ceo?: { prompt?: string };
-  departments: CompanyTemplateDepartment[];
-}
-
-// Worktree Info
-export interface WorktreeInfo {
-  worktree: string;
-  HEAD: string;
-  branch: string;
-  bare?: boolean;
-}
-
-// Risk Level & Approval
-export type RiskLevel = 'safe' | 'review' | 'critical';
-
-export interface ApprovalRequest {
-  id: string;
-  ptyId: string;
-  memberId: string;
-  memberName: string;
-  departmentName: string;
-  action: string;
-  riskLevel: RiskLevel;
-  timestamp: number;
-}
-
-// Message Routing
-export interface MessageRouteEvent {
-  from: string;
-  to: string;
-  message: string;
-  priority: 'low' | 'normal' | 'high';
-  isBroadcast: boolean;
-}
-
-// A2A Inbox
-export interface InboxMessage {
-  id: string;
-  from: string;
-  to: string;
-  message: string;
-  priority: string;
-  timestamp: number;
-  read: boolean;
-}
-
-export const MAX_INBOX_SIZE = 100;
 

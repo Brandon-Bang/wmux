@@ -220,6 +220,127 @@ export default function CommandPalette() {
       });
     });
 
+    // Company commands
+    const state = useStore.getState();
+    const hasCompany = !!state.company;
+
+    if (!hasCompany) {
+      const templates = [
+        { name: 'Full-Stack Team', label: 'Company: Create Full-Stack Team' },
+        { name: 'Startup MVP', label: 'Company: Create Startup MVP' },
+        { name: 'Code Review Squad', label: 'Company: Create Code Review Squad' },
+      ];
+      templates.forEach((tpl) => {
+        items.push({
+          id: `company-create-${tpl.name}`,
+          label: tpl.label,
+          category: 'command' as PaletteCategory,
+          icon: <IconCommand />,
+          action: () => {
+            import('../../../company/core/builtinTemplates').then(({ BUILTIN_TEMPLATES }) => {
+              const template = BUILTIN_TEMPLATES.find((t) => t.name === tpl.name);
+              if (!template) return;
+              const s = useStore.getState();
+              s.createCompany(tpl.name);
+              for (const dept of template.departments) {
+                s.addDepartment(dept.name, dept.leadName);
+                const fresh = useStore.getState();
+                const lastDept = fresh.company?.departments[fresh.company.departments.length - 1];
+                if (lastDept) {
+                  for (const member of dept.members) {
+                    useStore.getState().addMember(lastDept.id, member.name, member.preset);
+                  }
+                }
+              }
+              // Set CEO to current workspace
+              const current = useStore.getState();
+              if (current.company) {
+                current.setCeoWorkspace(current.activeWorkspaceId);
+                useStore.setState((s) => {
+                  const ws = s.workspaces.find((w) => w.id === s.activeWorkspaceId);
+                  if (ws) ws.companyRole = 'ceo';
+                });
+              }
+              useStore.getState().setSidebarMode('company');
+            });
+            setVisible(false);
+          },
+        });
+      });
+
+      items.push({
+        id: 'company-create-custom',
+        label: 'Company: Create Custom...',
+        category: 'command' as PaletteCategory,
+        icon: <IconCommand />,
+        action: () => {
+          const name = prompt('Company name:');
+          if (name?.trim()) {
+            useStore.getState().createCompany(name.trim());
+            const s = useStore.getState();
+            if (s.company) {
+              s.setCeoWorkspace(s.activeWorkspaceId);
+              useStore.setState((st) => {
+                const ws = st.workspaces.find((w) => w.id === st.activeWorkspaceId);
+                if (ws) ws.companyRole = 'ceo';
+              });
+            }
+            useStore.getState().setSidebarMode('company');
+          }
+          setVisible(false);
+        },
+      });
+    } else {
+      items.push({
+        id: 'company-provision-all',
+        label: 'Company: Provision All Members',
+        category: 'command' as PaletteCategory,
+        icon: <IconCommand />,
+        action: () => {
+          import('../../../company/renderer/provisioner').then(({ spawnCompany }) => {
+            const s = useStore.getState();
+            const c = s.company;
+            if (!c) return;
+            spawnCompany({
+              companyName: c.name,
+              skipPermissions: c.skipPermissions || false,
+              workDir: c.workDir,
+              departments: c.departments.map((d) => ({
+                name: d.name,
+                leadName: d.members.find((m) => m.id === d.leadId)?.name || 'Lead',
+                members: d.members.filter((m) => m.id !== d.leadId).map((m) => ({ name: m.name, preset: m.preset })),
+              })),
+            });
+          });
+          setVisible(false);
+        },
+      });
+
+      items.push({
+        id: 'company-destroy',
+        label: 'Company: Destroy',
+        category: 'command' as PaletteCategory,
+        icon: <IconCommand />,
+        action: () => {
+          useStore.getState().destroyCompany();
+          useStore.getState().setSidebarMode('workspaces');
+          setVisible(false);
+        },
+      });
+
+      items.push({
+        id: 'company-view-tab',
+        label: 'Company: Show Company Tab',
+        category: 'command' as PaletteCategory,
+        icon: <IconCommand />,
+        action: () => {
+          useStore.getState().setSidebarMode('company');
+          if (!useStore.getState().sidebarVisible) useStore.getState().toggleSidebar();
+          setVisible(false);
+        },
+      });
+    }
+
     return items;
   }, [workspaces, activeWorkspaceId, setVisible]);
 

@@ -3,8 +3,8 @@ import { describe, it, expect, beforeEach } from 'vitest';
 // Minimal Zustand test store — inline to avoid complex imports
 import { create } from 'zustand';
 import { immer } from 'zustand/middleware/immer';
-import { createCompanySlice, type CompanySlice } from '../companySlice';
-import type { Company } from '../../../../shared/types';
+import { createCompanySlice, type CompanySlice } from '../../../../company/renderer/store';
+import type { Company } from '../../../../company/types';
 
 // CompanySlice depends on StoreState which includes workspaces etc.
 // We create a minimal mock that satisfies the slice's needs.

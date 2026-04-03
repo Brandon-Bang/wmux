@@ -1,17 +1,17 @@
 import type { StateCreator } from 'zustand';
-import type { StoreState } from '../index';
-import {
-  generateId,
-  type Company,
-  type Department,
-  type TeamMember,
-  type AgentPreset,
-  type MemberStatus,
-  type ApprovalRequest,
-  type InboxMessage,
-  MAX_INBOX_SIZE,
-} from '../../../shared/types';
-import type { QueuedMessage } from '../../company/MessageQueue';
+import type { StoreState } from '../../renderer/stores/index';
+import { generateId } from '../../shared/types';
+import type {
+  Company,
+  Department,
+  TeamMember,
+  AgentPreset,
+  MemberStatus,
+  ApprovalRequest,
+  InboxMessage,
+} from '../types';
+import { MAX_INBOX_SIZE } from '../types';
+import type { QueuedMessage } from '../core/MessageQueue';
 
 /** Maximum number of pending messages in the queue to prevent memory exhaustion. */
 const MAX_MESSAGE_QUEUE_SIZE = 500;
@@ -22,7 +22,7 @@ export interface CompanySlice {
   company: Company | null;
 
   // Company CRUD
-  createCompany: (name: string, skipPermissions?: boolean) => void;
+  createCompany: (name: string, skipPermissions?: boolean, workDir?: string) => void;
   destroyCompany: () => void;
 
   // Department
@@ -97,13 +97,14 @@ export const createCompanySlice: StateCreator<StoreState, [['zustand/immer', nev
 
   // ─── Company CRUD ─────────────────────────────────────────────────────────
 
-  createCompany: (name, skipPermissions) => set((state) => {
+  createCompany: (name, skipPermissions, workDir) => set((state) => {
     const company: Company = {
       id: generateId('company'),
       name,
       departments: [],
       createdAt: Date.now(),
       skipPermissions,
+      workDir: workDir || undefined,
     };
     state.company = company;
     // 새 company 생성 시 세션 시작 시간 자동 설정

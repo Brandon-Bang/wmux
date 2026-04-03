@@ -6,7 +6,7 @@ import { createSurfaceSlice, type SurfaceSlice } from './slices/surfaceSlice';
 import { createUISlice, type UISlice } from './slices/uiSlice';
 import { createNotificationSlice, type NotificationSlice } from './slices/notificationSlice';
 import { createA2aSlice, type A2aSlice } from './slices/a2aSlice';
-import { createCompanySlice, type CompanySlice } from './slices/companySlice';
+import { createCompanySlice, type CompanySlice } from '../../company/renderer/store';
 
 export type StoreState = WorkspaceSlice & PaneSlice & SurfaceSlice & UISlice & NotificationSlice & A2aSlice & CompanySlice;
 

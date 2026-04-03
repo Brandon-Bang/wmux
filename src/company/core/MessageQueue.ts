@@ -4,7 +4,7 @@
 // when keystroke injection lands while an agent is mid-output.
 
 import { generateId } from '../../shared/types';
-import type { MemberStatus } from '../../shared/types';
+import type { MemberStatus } from '../types';
 import { formatMessage, formatBroadcast, type MessagePriority } from './messageTemplates';
 
 // ─── Types ────────────────────────────────────────────────────────────────────

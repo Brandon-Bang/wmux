@@ -1,6 +1,6 @@
 import type { BrowserWindow } from 'electron';
-import type { RpcRouter } from '../RpcRouter';
-import { sendToRenderer } from './_bridge';
+import type { RpcRouter } from '../../main/pipe/RpcRouter';
+import { sendToRenderer } from '../../main/pipe/handlers/_bridge';
 
 type GetWindow = () => BrowserWindow | null;
 
@@ -299,6 +299,34 @@ export function registerCompanyRpc(router: RpcRouter, getWindow: GetWindow): voi
       to: params['to'] ?? '',
       message: params['message'],
       broadcast: isBroadcast,
+    });
+  });
+
+  // ── Provisioning ─────────────────────────────────────────────────────────
+
+  router.register('company.provision', (params) => {
+    if (typeof params['memberId'] !== 'string' || params['memberId'].trim().length === 0) {
+      throw new Error('company.provision: missing required param "memberId"');
+    }
+    return sendToRenderer(getWindow, 'company.provision', {
+      memberId: params['memberId'],
+      cwd: typeof params['cwd'] === 'string' ? params['cwd'] : undefined,
+    });
+  });
+
+  router.register('company.provisionAll', (params) =>
+    sendToRenderer(getWindow, 'company.provisionAll', {
+      cwd: typeof params['cwd'] === 'string' ? params['cwd'] : undefined,
+    }),
+  );
+
+  router.register('company.provisionCeo', (params) => {
+    if (typeof params['workspaceId'] !== 'string' || params['workspaceId'].trim().length === 0) {
+      throw new Error('company.provisionCeo: missing required param "workspaceId"');
+    }
+    return sendToRenderer(getWindow, 'company.provisionCeo', {
+      workspaceId: params['workspaceId'],
+      cwd: typeof params['cwd'] === 'string' ? params['cwd'] : undefined,
     });
   });
 }

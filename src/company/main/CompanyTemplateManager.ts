@@ -1,7 +1,7 @@
 import { app } from 'electron';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { CompanyTemplate } from '../../shared/types';
+import type { CompanyTemplate } from '../types';
 
 /**
  * Company 구성을 JSON 파일로 저장/로드하는 매니저.

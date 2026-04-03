@@ -85,6 +85,7 @@ const electronAPI = {
   fs: {
     readDir: (dirPath: string) => ipcRenderer.invoke(IPC.FS_READ_DIR, dirPath),
     readFile: (filePath: string) => ipcRenderer.invoke(IPC.FS_READ_FILE, filePath) as Promise<string | null>,
+    writeFile: (filePath: string, content: string) => ipcRenderer.invoke(IPC.FS_WRITE_FILE, filePath, content) as Promise<boolean>,
     watch: (dirPath: string) => ipcRenderer.invoke(IPC.FS_WATCH, dirPath),
     unwatch: (dirPath: string) => ipcRenderer.invoke(IPC.FS_UNWATCH, dirPath),
     onChanged: (callback: (dirPath: string) => void) => {

@@ -86,7 +86,10 @@ export type RpcMethod =
   | 'company.a2a.broadcast'
   | 'company.a2a.inbox'
   | 'company.a2a.ack'
-  | 'company.a2a.status';
+  | 'company.a2a.status'
+  | 'company.provision'
+  | 'company.provisionAll'
+  | 'company.provisionCeo';
 
 // All available methods as array (for system.capabilities)
 export const ALL_RPC_METHODS = [
@@ -164,6 +167,9 @@ export const ALL_RPC_METHODS = [
   'company.a2a.inbox',
   'company.a2a.ack',
   'company.a2a.status',
+  'company.provision',
+  'company.provisionAll',
+  'company.provisionCeo',
 ] as const satisfies readonly RpcMethod[];
 
 // === RPC Parameter Types ===

@@ -2,10 +2,11 @@
  * Company mode RPC handlers — ported from wmux-max.
  * Handles company.*, company.a2a.* methods.
  */
-import { useStore } from '../stores';
-import type { Company, TeamMember, CompanyTemplate } from '../../shared/types';
+import { useStore } from '../../renderer/stores';
+import type { Company, TeamMember } from '../types';
 import { validateMessage } from '../../shared/types';
-import { formatMessage, formatBroadcast } from '../company/messageTemplates';
+import { formatMessage, formatBroadcast } from '../core/messageTemplates';
+import { spawnCompany, spawnMember } from './provisioner';
 
 type Store = ReturnType<typeof useStore.getState>;
 
@@ -68,7 +69,7 @@ function findLeafPanes(root: import('../../shared/types').Pane): import('../../s
   return root.children.flatMap(findLeafPanes);
 }
 
-type MessagePriority = import('../company/messageTemplates').MessagePriority;
+type MessagePriority = import('../core/messageTemplates').MessagePriority;
 
 // ---------------------------------------------------------------------------
 // Main handler
@@ -137,7 +138,7 @@ export async function handleCompanyRpc(
     if (!deptId) return { error: 'company.addMember: missing param "deptId"' };
     if (!name) return { error: 'company.addMember: missing param "name"' };
     if (!preset) return { error: 'company.addMember: missing param "preset"' };
-    store.addMember(deptId, name, preset as import('../../shared/types').AgentPreset, customPath);
+    store.addMember(deptId, name, preset as import('../types').AgentPreset, customPath);
     const c = useStore.getState().company;
     const dept = c?.departments.find((d) => d.id === deptId);
     const member = dept?.members.find((m) => m.name === name);
@@ -385,6 +386,48 @@ export async function handleCompanyRpc(
         })),
       })),
     };
+  }
+
+  // ── Provisioning ─────────────────────────────────────────────────────────
+
+  if (method === 'company.provision') {
+    const memberId = typeof params.memberId === 'string' ? params.memberId : '';
+    if (!memberId) return { error: 'company.provision: missing param "memberId"' };
+    const c = store.company;
+    if (!c) return { error: 'no company' };
+    // Find member
+    for (const dept of c.departments) {
+      const member = dept.members.find((m) => m.id === memberId);
+      if (!member) continue;
+      const lead = dept.members.find((m) => m.id === dept.leadId);
+      const result = await spawnMember(
+        c.name, dept.name, lead?.name || 'Lead', member.name, member.preset,
+        c.skipPermissions || false, c.workDir,
+      );
+      store.setMemberWorkspace(member.id, result.workspaceId);
+      store.setMemberPty(member.id, result.ptyId);
+      return { ok: true, ...result };
+    }
+    return { error: 'member not found' };
+  }
+
+  if (method === 'company.provisionAll') {
+    const c = store.company;
+    if (!c) return { error: 'no company' };
+    return spawnCompany({
+      companyName: c.name,
+      skipPermissions: c.skipPermissions || false,
+      workDir: c.workDir,
+      departments: c.departments.map((d) => ({
+        name: d.name,
+        leadName: d.members.find((m) => m.id === d.leadId)?.name || 'Lead',
+        members: d.members.filter((m) => m.id !== d.leadId).map((m) => ({ name: m.name, preset: m.preset })),
+      })),
+    });
+  }
+
+  if (method === 'company.provisionCeo') {
+    return { error: 'company.provisionCeo: CEO is auto-spawned during company creation' };
   }
 
   // TODO: company.save/restore/templates require template IPC handlers (not yet ported)

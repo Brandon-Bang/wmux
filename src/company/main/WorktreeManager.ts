@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import * as path from 'node:path';
-import type { WorktreeInfo } from '../../shared/types';
+import type { WorktreeInfo } from '../types';
 
 const execFileAsync = promisify(execFile);
 

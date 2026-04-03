@@ -3,16 +3,7 @@
 // 생성된 마크다운은 각 에이전트 워크스페이스의 시스템 프롬프트 또는
 // CLAUDE.md 파일로 주입됩니다.
 
-// PresetInfo inline (originally from Company UI component)
-interface PresetInfo {
-  id: string;
-  name: string;
-  description: string;
-  category: string;
-  icon: string;
-  tools: string[];
-  isLeadCapable: boolean;
-}
+import type { PresetInfo } from './presets';
 import type { WorkflowTemplate } from './workflows';
 
 // ─── Types ────────────────────────────────────────────────────────────────────

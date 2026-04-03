@@ -6,6 +6,11 @@ declare global {
       onFileDrop: (callback: (paths: string[]) => void) => () => void;
       fs?: {
         readDir: (dirPath: string) => Promise<{ name: string; path: string; isDirectory: boolean; isSymlink: boolean }[]>;
+        readFile: (filePath: string) => Promise<string | null>;
+        writeFile: (filePath: string, content: string) => Promise<boolean>;
+        watch: (dirPath: string) => Promise<boolean>;
+        unwatch: (dirPath: string) => Promise<void>;
+        onChanged: (callback: (dirPath: string) => void) => () => void;
       };
     };
     clipboardAPI: {

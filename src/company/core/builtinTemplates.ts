@@ -1,4 +1,4 @@
-import type { CompanyTemplate } from '../../shared/types';
+import type { CompanyTemplate } from '../types';
 
 export const BUILTIN_TEMPLATES: CompanyTemplate[] = [
   {

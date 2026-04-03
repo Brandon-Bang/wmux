@@ -4,7 +4,7 @@ import type { Pane, PaneLeaf, Surface } from '../../shared/types';
 import { validateMessage } from '../../shared/types';
 import type { Message, Part, TaskState, Artifact, AgentSkill } from '../../shared/types';
 import { generateId } from '../../shared/types';
-import { handleCompanyRpc } from './companyRpcHandlers';
+import { handleCompanyRpc } from '../../company/renderer/rpcHandlers';
 import { formatA2aMessage, formatA2aBroadcast } from '../utils/a2aFormat';
 import type { A2aPriority } from '../utils/a2aFormat';
 

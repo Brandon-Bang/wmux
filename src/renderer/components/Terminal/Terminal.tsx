@@ -73,8 +73,9 @@ export default function TerminalComponent({ ptyId: externalPtyId, shell, cwd, on
       rows = Math.max(2, Math.floor((container.offsetHeight - padding) / lineHeight));
     }
 
-    console.log(`[Terminal] Creating new PTY: shell=${shell}, cwd=${cwd}, cols=${cols}, rows=${rows}`);
-    window.electronAPI.pty.create({ shell, cwd, cols, rows }).then((result: { id: string }) => {
+    const workspaceId = useStore.getState().activeWorkspaceId;
+    console.log(`[Terminal] Creating new PTY: shell=${shell}, cwd=${cwd}, cols=${cols}, rows=${rows}, ws=${workspaceId}`);
+    window.electronAPI.pty.create({ shell, cwd, cols, rows, workspaceId }).then((result: { id: string }) => {
       if (cancelled) {
         // 이미 unmount됨 — PTY 정리
         window.electronAPI.pty.dispose(result.id);

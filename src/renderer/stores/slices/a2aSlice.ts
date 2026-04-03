@@ -1,28 +1,38 @@
 import type { StateCreator } from 'zustand';
 import type { StoreState } from '../index';
-import type { A2aTask, A2aTaskMessage, A2aTaskStatus, A2aArtifact } from '../../../shared/types';
+import type { Task, Message, TaskState, Artifact, AgentSkill } from '../../../shared/types';
 import { generateId, validateTransition, TERMINAL_STATES } from '../../../shared/types';
 
 const GC_MAX_AGE_MS = 30 * 60 * 1000; // 30 minutes
 const GC_MAX_TASKS = 500;
 
-export interface A2aSlice {
-  // Task store: taskId -> A2aTask
-  a2aTasks: Record<string, A2aTask>;
+function isoNow(): string {
+  return new Date().toISOString();
+}
 
-  // Agent skills: workspaceId -> skills
-  a2aAgentSkills: Record<string, string[] | null>;
+export interface A2aSlice {
+  // Task store: taskId -> Task
+  a2aTasks: Record<string, Task>;
+
+  // Agent skills: workspaceId -> AgentSkill[]
+  a2aAgentSkills: Record<string, AgentSkill[] | null>;
 
   // Actions
-  createA2aTask: (task: Omit<A2aTask, 'id' | 'createdAt' | 'updatedAt'>) => string;
-  addTaskMessage: (taskId: string, message: A2aTaskMessage) => void;
-  updateTaskStatus: (taskId: string, status: A2aTaskStatus, callerWorkspaceId: string) => { ok: boolean; error?: string };
-  addTaskArtifact: (taskId: string, artifact: A2aArtifact) => void;
+  createA2aTask: (task: {
+    title: string;
+    from: { workspaceId: string; name: string };
+    to: { workspaceId: string; name: string };
+    history: Message[];
+    artifacts: Artifact[];
+  }) => string;
+  addTaskMessage: (taskId: string, message: Message) => void;
+  updateTaskStatus: (taskId: string, state: TaskState, callerWorkspaceId: string, statusMessage?: Message) => { ok: boolean; error?: string };
+  addTaskArtifact: (taskId: string, artifact: Artifact) => void;
   cancelTask: (taskId: string, callerWorkspaceId: string) => { ok: boolean; error?: string };
-  queryTasks: (workspaceId: string, filters?: { status?: A2aTaskStatus; role?: 'sender' | 'receiver' }) => A2aTask[];
-  getTask: (taskId: string) => A2aTask | undefined;
-  setAgentSkills: (workspaceId: string, skills: string[]) => void;
-  getAgentSkills: (workspaceId: string) => string[] | null;
+  queryTasks: (workspaceId: string, filters?: { status?: TaskState; role?: 'user' | 'agent' }) => Task[];
+  getTask: (taskId: string) => Task | undefined;
+  setAgentSkills: (workspaceId: string, skills: AgentSkill[]) => void;
+  getAgentSkills: (workspaceId: string) => AgentSkill[] | null;
 
   // GC
   gcTerminalTasks: () => void;
@@ -32,16 +42,23 @@ export const createA2aSlice: StateCreator<StoreState, [['zustand/immer', never]]
   a2aTasks: {},
   a2aAgentSkills: {},
 
-  createA2aTask: (task) => {
+  createA2aTask: (input) => {
     const id = generateId('task');
-    const now = Date.now();
+    const now = isoNow();
     set((state: StoreState) => {
       state.a2aTasks[id] = {
-        ...task,
+        kind: 'task',
         id,
-        status: 'submitted',
-        createdAt: now,
-        updatedAt: now,
+        status: { state: 'submitted', timestamp: now },
+        history: input.history,
+        artifacts: input.artifacts,
+        metadata: {
+          title: input.title,
+          from: input.from,
+          to: input.to,
+          createdAt: now,
+          updatedAt: now,
+        },
       };
     });
     return id;
@@ -50,29 +67,29 @@ export const createA2aSlice: StateCreator<StoreState, [['zustand/immer', never]]
   addTaskMessage: (taskId, message) => set((state: StoreState) => {
     const task = state.a2aTasks[taskId];
     if (task) {
-      task.messages.push(message);
-      task.updatedAt = Date.now();
+      task.history.push(message);
+      task.metadata.updatedAt = isoNow();
     }
   }),
 
-  updateTaskStatus: (taskId, status, callerWorkspaceId) => {
+  updateTaskStatus: (taskId, newState, callerWorkspaceId, statusMessage) => {
     const task = get().a2aTasks[taskId];
     if (!task) {
       return { ok: false, error: `Task not found: ${taskId}` };
     }
     // Permission: only receiver can update status
-    if (task.to.workspaceId !== callerWorkspaceId) {
+    if (task.metadata.to.workspaceId !== callerWorkspaceId) {
       return { ok: false, error: `Permission denied: caller ${callerWorkspaceId} is not the receiver` };
     }
     // Validate state transition
-    if (!validateTransition(task.status, status)) {
-      return { ok: false, error: `Invalid transition: ${task.status} -> ${status}` };
+    if (!validateTransition(task.status.state, newState)) {
+      return { ok: false, error: `Invalid transition: ${task.status.state} -> ${newState}` };
     }
     set((state: StoreState) => {
       const t = state.a2aTasks[taskId];
       if (t) {
-        t.status = status;
-        t.updatedAt = Date.now();
+        t.status = { state: newState, message: statusMessage, timestamp: isoNow() };
+        t.metadata.updatedAt = isoNow();
       }
     });
     return { ok: true };
@@ -82,7 +99,7 @@ export const createA2aSlice: StateCreator<StoreState, [['zustand/immer', never]]
     const task = state.a2aTasks[taskId];
     if (task) {
       task.artifacts.push(artifact);
-      task.updatedAt = Date.now();
+      task.metadata.updatedAt = isoNow();
     }
   }),
 
@@ -92,18 +109,18 @@ export const createA2aSlice: StateCreator<StoreState, [['zustand/immer', never]]
       return { ok: false, error: `Task not found: ${taskId}` };
     }
     // Permission: only sender can cancel
-    if (task.from.workspaceId !== callerWorkspaceId) {
+    if (task.metadata.from.workspaceId !== callerWorkspaceId) {
       return { ok: false, error: `Permission denied: caller ${callerWorkspaceId} is not the sender` };
     }
     // Validate state transition
-    if (!validateTransition(task.status, 'canceled')) {
-      return { ok: false, error: `Cannot cancel task in state: ${task.status}` };
+    if (!validateTransition(task.status.state, 'canceled')) {
+      return { ok: false, error: `Cannot cancel task in state: ${task.status.state}` };
     }
     set((state: StoreState) => {
       const t = state.a2aTasks[taskId];
       if (t) {
-        t.status = 'canceled';
-        t.updatedAt = Date.now();
+        t.status = { state: 'canceled', timestamp: isoNow() };
+        t.metadata.updatedAt = isoNow();
       }
     });
     return { ok: true };
@@ -112,17 +129,16 @@ export const createA2aSlice: StateCreator<StoreState, [['zustand/immer', never]]
   queryTasks: (workspaceId, filters) => {
     const tasks = Object.values(get().a2aTasks);
     return tasks.filter((task) => {
-      // Must be related to the workspace (as sender or receiver)
-      const isSender = task.from.workspaceId === workspaceId;
-      const isReceiver = task.to.workspaceId === workspaceId;
+      const isSender = task.metadata.from.workspaceId === workspaceId;
+      const isReceiver = task.metadata.to.workspaceId === workspaceId;
       if (!isSender && !isReceiver) return false;
 
-      // Role filter
-      if (filters?.role === 'sender' && !isSender) return false;
-      if (filters?.role === 'receiver' && !isReceiver) return false;
+      // Role filter: 'user' = sender, 'agent' = receiver
+      if (filters?.role === 'user' && !isSender) return false;
+      if (filters?.role === 'agent' && !isReceiver) return false;
 
       // Status filter
-      if (filters?.status && task.status !== filters.status) return false;
+      if (filters?.status && task.status.state !== filters.status) return false;
 
       return true;
     });
@@ -149,8 +165,8 @@ export const createA2aSlice: StateCreator<StoreState, [['zustand/immer', never]]
       const task = state.a2aTasks[id];
       if (
         task &&
-        (TERMINAL_STATES as readonly string[]).includes(task.status) &&
-        now - task.updatedAt > GC_MAX_AGE_MS
+        (TERMINAL_STATES as readonly string[]).includes(task.status.state) &&
+        now - new Date(task.metadata.updatedAt).getTime() > GC_MAX_AGE_MS
       ) {
         delete state.a2aTasks[id];
       }
@@ -160,8 +176,8 @@ export const createA2aSlice: StateCreator<StoreState, [['zustand/immer', never]]
     const remaining = Object.values(state.a2aTasks);
     if (remaining.length > GC_MAX_TASKS) {
       const terminalTasks = remaining
-        .filter((t) => (TERMINAL_STATES as readonly string[]).includes(t.status))
-        .sort((a, b) => a.updatedAt - b.updatedAt);
+        .filter((t) => (TERMINAL_STATES as readonly string[]).includes(t.status.state))
+        .sort((a, b) => new Date(a.metadata.updatedAt).getTime() - new Date(b.metadata.updatedAt).getTime());
 
       let toRemove = remaining.length - GC_MAX_TASKS;
       for (const task of terminalTasks) {

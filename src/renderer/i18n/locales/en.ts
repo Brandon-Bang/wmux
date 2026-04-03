@@ -14,6 +14,8 @@ export const en = {
   'workspace.agentWaiting': 'Agent waiting',
   'workspace.agentIdle': 'Agent idle',
   'workspace.close': 'Close workspace',
+  'workspace.copyInfo': 'Copy session info',
+  'workspace.copied': 'Copied!',
 
   // Pane
   'pane.empty': 'Empty pane',

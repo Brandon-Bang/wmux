@@ -6,8 +6,9 @@ import { createSurfaceSlice, type SurfaceSlice } from './slices/surfaceSlice';
 import { createUISlice, type UISlice } from './slices/uiSlice';
 import { createNotificationSlice, type NotificationSlice } from './slices/notificationSlice';
 import { createA2aSlice, type A2aSlice } from './slices/a2aSlice';
+import { createCompanySlice, type CompanySlice } from './slices/companySlice';
 
-export type StoreState = WorkspaceSlice & PaneSlice & SurfaceSlice & UISlice & NotificationSlice & A2aSlice;
+export type StoreState = WorkspaceSlice & PaneSlice & SurfaceSlice & UISlice & NotificationSlice & A2aSlice & CompanySlice;
 
 export const useStore = create<StoreState>()(
   immer((...args) => ({
@@ -17,5 +18,6 @@ export const useStore = create<StoreState>()(
     ...createUISlice(...args),
     ...createNotificationSlice(...args),
     ...createA2aSlice(...args),
+    ...createCompanySlice(...args),
   }))
 );

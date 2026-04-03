@@ -217,7 +217,7 @@ export default function AppLayout() {
       console.log('[AppLayout] Daemon active PTYs:', [...activeIds]);
 
       const state = useStore.getState();
-      const reconcile = async (pane: Pane) => {
+      const reconcile = async (pane: Pane, wsId: string) => {
         if (pane.type === 'leaf') {
           for (const surface of pane.surfaces) {
             if (surface.surfaceType === 'browser' || surface.surfaceType === 'editor') continue;
@@ -236,7 +236,7 @@ export default function AppLayout() {
             } else {
               console.log(`[AppLayout] Surface ${surface.id}: ptyId ${surface.ptyId} not in daemon, creating new PTY`);
               try {
-                const newPty = await window.electronAPI.pty.create({ cwd: surface.cwd });
+                const newPty = await window.electronAPI.pty.create({ cwd: surface.cwd, workspaceId: wsId });
                 useStore.getState().updateSurfacePtyId(pane.id, surface.id, newPty.id);
               } catch (err) {
                 console.error(`[AppLayout] Failed to create replacement PTY:`, err);
@@ -245,13 +245,13 @@ export default function AppLayout() {
             }
           }
         } else {
-          for (const child of pane.children) await reconcile(child);
+          for (const child of pane.children) await reconcile(child, wsId);
         }
       };
 
       for (const ws of state.workspaces) {
         console.log(`[AppLayout] Reconciling workspace: ${ws.name}`);
-        await reconcile(ws.rootPane);
+        await reconcile(ws.rootPane, ws.id);
       }
       console.log('[AppLayout] Reconciliation complete');
     } catch (err) {
@@ -331,7 +331,7 @@ export default function AppLayout() {
     if (root.surfaces.length === 0) {
       let cancelled = false;
       const paneId = root.id;
-      window.electronAPI.pty.create().then((result: { id: string; cwd?: string }) => {
+      window.electronAPI.pty.create({ workspaceId: activeWorkspace.id }).then((result: { id: string; cwd?: string }) => {
         if (cancelled) {
           window.electronAPI.pty.dispose(result.id);
           return;

@@ -56,6 +56,7 @@ export type RpcMethod =
   | 'daemon.resizeSession'
   | 'daemon.listSessions'
   | 'daemon.ping'
+  | 'a2a.resolve.identity'
   | 'a2a.whoami'
   | 'a2a.discover'
   | 'a2a.task.send'
@@ -63,7 +64,29 @@ export type RpcMethod =
   | 'a2a.task.update'
   | 'a2a.task.cancel'
   | 'a2a.broadcast'
-  | 'meta.setSkills';
+  | 'meta.setSkills'
+  | 'company.create'
+  | 'company.destroy'
+  | 'company.status'
+  | 'company.addDept'
+  | 'company.removeDept'
+  | 'company.addMember'
+  | 'company.removeMember'
+  | 'company.broadcast'
+  | 'company.sendDept'
+  | 'company.sendMember'
+  | 'company.message'
+  | 'company.save'
+  | 'company.restore'
+  | 'company.templates'
+  | 'company.worktreeSetup'
+  | 'company.mergeDept'
+  | 'company.a2a.whoami'
+  | 'company.a2a.send'
+  | 'company.a2a.broadcast'
+  | 'company.a2a.inbox'
+  | 'company.a2a.ack'
+  | 'company.a2a.status';
 
 // All available methods as array (for system.capabilities)
 export const ALL_RPC_METHODS = [
@@ -110,6 +133,7 @@ export const ALL_RPC_METHODS = [
   'daemon.resizeSession',
   'daemon.listSessions',
   'daemon.ping',
+  'a2a.resolve.identity',
   'a2a.whoami',
   'a2a.discover',
   'a2a.task.send',
@@ -118,6 +142,28 @@ export const ALL_RPC_METHODS = [
   'a2a.task.cancel',
   'a2a.broadcast',
   'meta.setSkills',
+  'company.create',
+  'company.destroy',
+  'company.status',
+  'company.addDept',
+  'company.removeDept',
+  'company.addMember',
+  'company.removeMember',
+  'company.broadcast',
+  'company.sendDept',
+  'company.sendMember',
+  'company.message',
+  'company.save',
+  'company.restore',
+  'company.templates',
+  'company.worktreeSetup',
+  'company.mergeDept',
+  'company.a2a.whoami',
+  'company.a2a.send',
+  'company.a2a.broadcast',
+  'company.a2a.inbox',
+  'company.a2a.ack',
+  'company.a2a.status',
 ] as const satisfies readonly RpcMethod[];
 
 // === RPC Parameter Types ===

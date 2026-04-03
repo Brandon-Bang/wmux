@@ -14,6 +14,8 @@ export const ja = {
   'workspace.agentWaiting': 'エージェント待機中',
   'workspace.agentIdle': 'エージェントアイドル',
   'workspace.close': 'ワークスペースを閉じる',
+  'workspace.copyInfo': 'セッション情報をコピー',
+  'workspace.copied': 'コピーしました！',
 
   // Pane
   'pane.empty': '空のペイン',

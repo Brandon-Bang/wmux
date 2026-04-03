@@ -181,7 +181,7 @@ export default function CommandPalette() {
           const state = useStore.getState();
           const ws = state.workspaces.find((w) => w.id === state.activeWorkspaceId);
           if (ws) {
-            window.electronAPI.pty.create().then((result: { id: string }) => {
+            window.electronAPI.pty.create({ workspaceId: ws.id }).then((result: { id: string }) => {
               useStore.getState().addSurface(ws.activePaneId, result.id, 'Terminal', '');
             });
           }

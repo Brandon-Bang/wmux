@@ -2,7 +2,7 @@ import * as net from 'net';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
 import type { RpcMethod, RpcResponse } from '../shared/rpc';
-import { getPipeName, getAuthTokenPath } from '../shared/constants';
+import { getPipeName, getAuthTokenPath, getTcpPortPath } from '../shared/constants';
 
 const TIMEOUT_MS = 10000;
 const RETRY_COUNT = 3;
@@ -20,8 +20,15 @@ function readAuthToken(): string | undefined {
   return undefined;
 }
 
+function readTcpPort(): number | undefined {
+  try {
+    const port = parseInt(fs.readFileSync(getTcpPortPath(), 'utf8').trim(), 10);
+    return Number.isFinite(port) ? port : undefined;
+  } catch { return undefined; }
+}
+
 function attemptRpc(
-  pipePath: string,
+  target: string | { host: string; port: number },
   token: string,
   method: RpcMethod,
   params: Record<string, unknown>,
@@ -30,7 +37,7 @@ function attemptRpc(
     const id = crypto.randomUUID();
     const request = JSON.stringify({ id, method, params, token }) + '\n';
 
-    const socket = net.connect(pipePath);
+    const socket = typeof target === 'string' ? net.connect(target) : net.connect(target);
     let buffer = '';
     let settled = false;
 
@@ -102,6 +109,11 @@ export async function sendRpc(
   method: RpcMethod,
   params: Record<string, unknown> = {},
 ): Promise<unknown> {
+  const token = readAuthToken();
+  if (!token) {
+    throw new Error('wmux auth token not found. Is wmux running?');
+  }
+
   // Try WMUX_SOCKET_PATH first (if set), then fall back to getPipeName().
   // Claude Code may cache a stale WMUX_SOCKET_PATH from a previous session,
   // so we must fall back to the derived name if the env path fails.
@@ -109,30 +121,39 @@ export async function sendRpc(
   const derivedPath = getPipeName();
   const pipePaths = envPath && envPath !== derivedPath ? [envPath, derivedPath] : [derivedPath];
 
+  // On Windows, add TCP localhost fallback (avoids named pipe EPERM issues)
+  const tcpPort = process.platform === 'win32' ? readTcpPort() : undefined;
+
+  let lastError: Error | undefined;
+
   for (const pipePath of pipePaths) {
     for (let attempt = 0; attempt < RETRY_COUNT; attempt++) {
-      const token = readAuthToken();
-      if (!token) {
-        throw new Error('wmux auth token not found. Is wmux running?');
-      }
-
       try {
         return await attemptRpc(pipePath, token, method, params);
       } catch (err) {
-        const msg = (err as Error).message;
+        lastError = err as Error;
+        const msg = lastError.message;
         const isRetryable = msg.includes('not running') || msg.includes('unauthorized');
+        const isPerm = msg.includes('EPERM');
+        if (isPerm) break; // Don't retry EPERM — fall through to TCP
         if (isRetryable && attempt < RETRY_COUNT - 1) {
           await sleep(RETRY_DELAY_MS);
           continue;
         }
-        // If env path failed and we have a fallback, break to try derived path
         if (isRetryable && pipePaths.length > 1 && pipePath === envPath) {
           break;
         }
-        throw err;
+        if (!isRetryable && !isPerm) throw err;
       }
     }
   }
 
-  throw new Error('wmux is not running. Start the app first.');
+  // TCP localhost fallback — bypasses Windows named pipe ACL issues
+  if (tcpPort) {
+    try {
+      return await attemptRpc({ host: '127.0.0.1', port: tcpPort }, token, method, params);
+    } catch { /* fall through */ }
+  }
+
+  throw lastError ?? new Error('wmux is not running. Start the app first.');
 }

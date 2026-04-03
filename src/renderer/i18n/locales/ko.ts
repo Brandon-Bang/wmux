@@ -14,6 +14,8 @@ export const ko = {
   'workspace.agentWaiting': '에이전트 대기 중',
   'workspace.agentIdle': '에이전트 유휴',
   'workspace.close': '워크스페이스 닫기',
+  'workspace.copyInfo': '세션 정보 복사',
+  'workspace.copied': '복사됨!',
 
   // Pane
   'pane.empty': '빈 창',

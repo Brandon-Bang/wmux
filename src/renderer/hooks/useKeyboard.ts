@@ -109,7 +109,7 @@ export function useKeyboard() {
         const state = store.getState();
         const ws = state.workspaces.find((w) => w.id === state.activeWorkspaceId);
         if (ws) {
-          window.electronAPI.pty.create().then((result: { id: string }) => {
+          window.electronAPI.pty.create({ workspaceId: ws.id }).then((result: { id: string }) => {
             store.getState().addSurface(ws.activePaneId, result.id, 'Terminal', '');
           });
         }

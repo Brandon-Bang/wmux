@@ -1,7 +1,7 @@
 import type { StateCreator } from 'zustand';
 import type { StoreState } from '../index';
 import { setLocale as i18nSetLocale, type Locale } from '../../i18n';
-import { generateId, type CustomKeybinding, type CustomThemeColors } from '../../../shared/types';
+import { generateId, type CustomKeybinding, type CustomThemeColors, type Company } from '../../../shared/types';
 import { applyCustomCssVars, clearCustomCssVars, DEFAULT_CUSTOM_THEME } from '../../themes';
 
 export interface UISlice {
@@ -83,8 +83,8 @@ export interface UISlice {
   sidebarMode: 'workspaces' | 'company';
   setSidebarMode: (mode: 'workspaces' | 'company') => void;
 
-  company: { name: string; totalCostEstimate: number } | null;
-  setCompany: (company: { name: string; totalCostEstimate: number } | null) => void;
+  company: Company | null;
+  setCompany: (company: Company | null) => void;
 
   memberCosts: Record<string, number>;
   setMemberCosts: (costs: Record<string, number>) => void;
@@ -299,7 +299,15 @@ export const createUISlice: StateCreator<StoreState, [['zustand/immer', never]],
   }),
 
   // ─── Custom keybindings ──────────────────────────────────────────────
-  customKeybindings: [],
+  customKeybindings: [
+    {
+      id: 'kb-default-f7',
+      key: 'F7',
+      label: 'Claude (skip permissions)',
+      command: 'claude --dangerously-skip-permissions',
+      sendEnter: true,
+    },
+  ],
 
   addKeybinding: (kb) => set((state) => {
     state.customKeybindings.push({

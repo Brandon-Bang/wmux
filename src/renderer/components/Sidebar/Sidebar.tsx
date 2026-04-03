@@ -1,7 +1,13 @@
 import { useStore } from '../../stores';
 import WorkspaceItem from './WorkspaceItem';
-import type { Pane } from '../../../shared/types';
+import type { Pane, PaneLeaf, Surface } from '../../../shared/types';
 import { useT } from '../../hooks/useT';
+
+// Pane 트리에서 모든 leaf를 수집
+function collectLeaves(pane: Pane): PaneLeaf[] {
+  if (pane.type === 'leaf') return [pane];
+  return pane.children.flatMap(collectLeaves);
+}
 
 // Pane 트리에서 모든 leaf의 PTY를 dispose
 function disposeAllPtys(pane: Pane) {
@@ -31,6 +37,38 @@ export default function Sidebar() {
 
   const handleCtrlSelect = (wsId: string) => {
     toggleMultiviewWorkspace(wsId);
+  };
+
+  const handleCopySessionInfo = async (wsId: string) => {
+    const ws = workspaces.find((w) => w.id === wsId);
+    if (!ws) return;
+
+    const leaves = collectLeaves(ws.rootPane);
+    const surfaces: Surface[] = leaves.flatMap((l) => l.surfaces);
+
+    const meta = ws.metadata;
+    const lines: string[] = [
+      `You are "${ws.name}" (${ws.id}).`,
+    ];
+    if (meta?.cwd) lines.push(`CWD: ${meta.cwd}`);
+
+    // Compact surface summary
+    const termSurfaces = surfaces.filter((s) => (s.surfaceType || 'terminal') === 'terminal');
+    const browserSurfaces = surfaces.filter((s) => s.surfaceType === 'browser');
+    const parts: string[] = [];
+    if (termSurfaces.length) parts.push(`${termSurfaces.length} terminal`);
+    if (browserSurfaces.length) parts.push(`${browserSurfaces.length} browser`);
+    if (parts.length) lines.push(`Surfaces: ${parts.join(', ')}`);
+
+    await window.clipboardAPI.writeText(lines.join('\n'));
+
+    // Toast feedback
+    const toast = document.createElement('div');
+    toast.textContent = t('workspace.copied');
+    toast.style.cssText = 'position:fixed;bottom:40px;left:50%;transform:translateX(-50%);background:var(--bg-surface);color:var(--text-main);padding:4px 12px;border-radius:4px;font-size:12px;z-index:9999;opacity:0;transition:opacity .2s';
+    document.body.appendChild(toast);
+    requestAnimationFrame(() => { toast.style.opacity = '1'; });
+    setTimeout(() => { toast.style.opacity = '0'; setTimeout(() => toast.remove(), 200); }, 1500);
   };
 
   const handleClose = (wsId: string) => {
@@ -79,6 +117,7 @@ export default function Sidebar() {
             onCtrlSelect={() => handleCtrlSelect(ws.id)}
             onRename={(name) => renameWorkspace(ws.id, name)}
             onClose={() => handleClose(ws.id)}
+            onCopyInfo={() => handleCopySessionInfo(ws.id)}
             onReorder={reorderWorkspace}
           />
         ))}

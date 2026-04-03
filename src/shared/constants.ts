@@ -72,3 +72,17 @@ export function getAuthTokenPath(): string {
   const home = process.env.USERPROFILE || process.env.HOME || '';
   return `${home}/.wmux-auth-token`;
 }
+
+// PID-to-workspace mapping directory — written by PTYManager, read by MCP server
+// to resolve workspace identity when env vars don't propagate through Claude Code
+export function getPidMapDir(): string {
+  const home = process.env.USERPROFILE || process.env.HOME || '';
+  return `${home}/.wmux/pid-map`;
+}
+
+// TCP port file path — written by PipeServer, read by MCP clients as fallback
+// when Windows named pipe EPERM blocks direct pipe connections
+export function getTcpPortPath(): string {
+  const home = process.env.USERPROFILE || process.env.HOME || '';
+  return `${home}/.wmux-tcp-port`;
+}

@@ -14,6 +14,8 @@ export const zh = {
   'workspace.agentWaiting': '智能体等待中',
   'workspace.agentIdle': '智能体空闲',
   'workspace.close': '关闭工作区',
+  'workspace.copyInfo': '复制会话信息',
+  'workspace.copied': '已复制！',
 
   // Pane
   'pane.empty': '空面板',

@@ -4,7 +4,7 @@ import path from 'node:path';
 import { PTYManager } from '../../pty/PTYManager';
 import { PTYBridge } from '../../pty/PTYBridge';
 import { DaemonClient } from '../../DaemonClient';
-import { IPC } from '../../../shared/constants';
+import { IPC, getPidMapDir } from '../../../shared/constants';
 import { sanitizePtyText } from '../../../shared/types';
 import { updateCwd } from './metadata.handler';
 
@@ -42,6 +42,15 @@ function validateCwd(cwd: string | undefined): string | undefined {
   return resolved;
 }
 
+/** Write sessionId/PID → workspaceId mapping for MCP identity resolution */
+function writePidMap(key: string | number, workspaceId: string): void {
+  try {
+    const dir = getPidMapDir();
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, String(key)), workspaceId, 'utf8');
+  } catch { /* best-effort */ }
+}
+
 export function registerPTYHandlers(
   ptyManager: PTYManager,
   ptyBridge: PTYBridge,
@@ -56,7 +65,7 @@ export function registerPTYHandlers(
   // pty:create
   ipcMain.removeHandler(IPC.PTY_CREATE);
   if (useDaemon && daemonClient) {
-    ipcMain.handle(IPC.PTY_CREATE, async (_event, options?: { shell?: string; cwd?: string; cols?: number; rows?: number }) => {
+    ipcMain.handle(IPC.PTY_CREATE, async (_event, options?: { shell?: string; cwd?: string; cols?: number; rows?: number; workspaceId?: string }) => {
       if (options?.shell !== undefined && !isAllowedShell(options.shell)) {
         throw new Error(`PTY_CREATE: shell not allowed: ${options.shell}`);
       }
@@ -98,10 +107,17 @@ export function registerPTYHandlers(
       // Register initial CWD
       updateCwd(sessionId, effectiveCwd);
 
+      // Write shell PID→workspaceId mapping for MCP workspace identity resolution
+      // (Claude Code doesn't propagate env vars to MCP child processes)
+      const shellPid = (result as { pid?: number })?.pid;
+      if (options?.workspaceId && shellPid) {
+        writePidMap(shellPid, options.workspaceId);
+      }
+
       return { id: sessionId, shell, cwd: effectiveCwd };
     });
   } else {
-    ipcMain.handle(IPC.PTY_CREATE, (_event, options?: { shell?: string; cwd?: string; cols?: number; rows?: number }) => {
+    ipcMain.handle(IPC.PTY_CREATE, (_event, options?: { shell?: string; cwd?: string; cols?: number; rows?: number; workspaceId?: string; surfaceId?: string }) => {
       if (options?.shell !== undefined && !isAllowedShell(options.shell)) {
         throw new Error(`PTY_CREATE: shell not allowed: ${options.shell}`);
       }

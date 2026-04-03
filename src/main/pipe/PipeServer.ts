@@ -1,7 +1,7 @@
 import * as net from 'net';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
-import { getPipeName, getAuthTokenPath } from '../../shared/constants';
+import { getPipeName, getAuthTokenPath, getTcpPortPath } from '../../shared/constants';
 import type { RpcRequest } from '../../shared/rpc';
 import { RpcRouter } from './RpcRouter';
 
@@ -9,6 +9,7 @@ const MAX_LINE_BUFFER = 1024 * 1024; // 1 MB — prevent OOM from malicious clie
 
 export class PipeServer {
   private server: net.Server | null = null;
+  private tcpServer: net.Server | null = null;
   private readonly router: RpcRouter;
   private readonly connectedSockets = new Set<net.Socket>();
   private readonly authToken: string;
@@ -42,6 +43,7 @@ export class PipeServer {
     if (this.server) return;
     this.retryCount = 0;
     this.startInternal();
+    this.startTcpFallback();
   }
 
   private startInternal(): void {
@@ -100,7 +102,7 @@ export class PipeServer {
   }
 
   stop(): void {
-    if (!this.server) {
+    if (!this.server && !this.tcpServer) {
       return;
     }
 
@@ -110,30 +112,65 @@ export class PipeServer {
     }
     this.connectedSockets.clear();
 
-    this.server.close((err) => {
-      if (err) {
-        console.error('[PipeServer] Error closing server:', err);
-      } else {
-        console.log('[PipeServer] Server closed.');
-      }
-      // Clean up Unix socket file
-      if (process.platform !== 'win32') {
-        const stopPipeName = getPipeName();
-        try {
-          const stat = require('fs').lstatSync(stopPipeName);
-          // Only remove if it's a socket (not a symlink to something else)
-          if (stat.isSocket()) {
-            require('fs').unlinkSync(stopPipeName);
-          } else {
-            console.warn(`[PipeServer] ${stopPipeName} exists but is not a socket — skipping removal`);
-          }
-        } catch {
-          // File doesn't exist — fine
+    if (this.server) {
+      this.server.close((err) => {
+        if (err) {
+          console.error('[PipeServer] Error closing server:', err);
+        } else {
+          console.log('[PipeServer] Server closed.');
         }
-      }
+        // Clean up Unix socket file
+        if (process.platform !== 'win32') {
+          const stopPipeName = getPipeName();
+          try {
+            const stat = require('fs').lstatSync(stopPipeName);
+            if (stat.isSocket()) {
+              require('fs').unlinkSync(stopPipeName);
+            } else {
+              console.warn(`[PipeServer] ${stopPipeName} exists but is not a socket — skipping removal`);
+            }
+          } catch {
+            // File doesn't exist — fine
+          }
+        }
+      });
+      this.server = null;
+    }
+
+    if (this.tcpServer) {
+      this.tcpServer.close();
+      this.tcpServer = null;
+      // Clean up TCP port file
+      try { fs.unlinkSync(getTcpPortPath()); } catch { /* ignore */ }
+      console.log('[PipeServer] TCP fallback server closed.');
+    }
+  }
+
+  private startTcpFallback(): void {
+    if (process.platform !== 'win32') return; // Only needed on Windows
+
+    this.tcpServer = net.createServer((socket) => {
+      this.connectedSockets.add(socket);
+      socket.on('close', () => {
+        this.connectedSockets.delete(socket);
+        this.rateLimits.delete(socket);
+      });
+      this.handleConnection(socket);
     });
 
-    this.server = null;
+    this.tcpServer.maxConnections = PipeServer.MAX_CONNECTIONS;
+
+    this.tcpServer.on('error', (err) => {
+      console.error('[PipeServer] TCP fallback error:', err);
+    });
+
+    // Listen on random port on localhost only
+    this.tcpServer.listen(0, '127.0.0.1', () => {
+      const addr = this.tcpServer!.address() as net.AddressInfo;
+      const portFile = getTcpPortPath();
+      fs.writeFileSync(portFile, String(addr.port), 'utf8');
+      console.log(`[PipeServer] TCP fallback listening on 127.0.0.1:${addr.port}`);
+    });
   }
 
   private handleConnection(socket: net.Socket): void {

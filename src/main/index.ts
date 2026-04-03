@@ -21,6 +21,8 @@ import { registerMetaRpc } from './pipe/handlers/meta.rpc';
 import { registerSystemRpc } from './pipe/handlers/system.rpc';
 import { registerBrowserRpc } from './pipe/handlers/browser.rpc';
 import { registerA2aRpc } from './pipe/handlers/a2a.rpc';
+import { registerCompanyRpc } from './pipe/handlers/company.rpc';
+import { ClaudeWorker } from './a2a/ClaudeWorker';
 import { AutoUpdater } from './updater/AutoUpdater';
 import { McpRegistrar } from './mcp/McpRegistrar';
 import { WebviewCdpManager } from './browser-session/WebviewCdpManager';
@@ -153,6 +155,8 @@ const pipeServer = new PipeServer(rpcRouter);
 const mcpRegistrar = new McpRegistrar();
 const webviewCdpManager = new WebviewCdpManager(cdpPort);
 
+const claudeWorker = new ClaudeWorker(() => mainWindow);
+
 // Daemon client — initialized on app ready, used if daemon is available
 let daemonClient: DaemonClient | null = null;
 
@@ -219,7 +223,8 @@ registerNotifyRpc(rpcRouter, () => mainWindow);
 registerMetaRpc(rpcRouter, () => mainWindow);
 registerSystemRpc(rpcRouter);
 registerBrowserRpc(rpcRouter, () => mainWindow, webviewCdpManager);
-registerA2aRpc(rpcRouter, () => mainWindow);
+registerA2aRpc(rpcRouter, () => mainWindow, claudeWorker);
+registerCompanyRpc(rpcRouter, () => mainWindow);
 
 // IPC: webview CDP registration
 ipcMain.handle('browser:register-webview', async (_event, surfaceId: string, webContentsId: number) => {
@@ -346,6 +351,7 @@ app.on('before-quit', async (e) => {
     ptyManager.disposeAll();
   }
 
+  claudeWorker.stop();
   webviewCdpManager.disposeAll();
   pipeServer.stop();
   mcpRegistrar.unregister();

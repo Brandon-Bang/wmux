@@ -12,6 +12,7 @@ interface WorkspaceItemProps {
   onCtrlSelect: () => void;
   onRename: (name: string) => void;
   onClose: () => void;
+  onCopyInfo: () => void;
   onReorder: (fromIndex: number, toIndex: number) => void;
 }
 
@@ -45,7 +46,7 @@ function shortenPath(path: string, maxLen = 25): string {
   return `.../${parts.slice(-2).join('/')}`;
 }
 
-export default function WorkspaceItem({ workspace, isActive, isMultiview, index, onSelect, onCtrlSelect, onRename, onClose, onReorder }: WorkspaceItemProps) {
+export default function WorkspaceItem({ workspace, isActive, isMultiview, index, onSelect, onCtrlSelect, onRename, onClose, onCopyInfo, onReorder }: WorkspaceItemProps) {
   const t = useT();
   const [editing, setEditing] = useState(false);
   const [editName, setEditName] = useState(workspace.name);
@@ -198,6 +199,15 @@ export default function WorkspaceItem({ workspace, isActive, isMultiview, index,
         <span className="text-[8px] font-mono text-[var(--text-muted)] flex-shrink-0 mt-0.5">
           {index < 9 ? `^${index + 1}` : ''}
         </span>
+
+        {/* Copy session info button */}
+        <button
+          className="opacity-0 group-hover:opacity-100 text-[var(--text-subtle)] hover:text-[var(--accent-blue)] text-[10px] font-mono flex-shrink-0 mt-0.5 transition-opacity"
+          onClick={(e) => { e.stopPropagation(); onCopyInfo(); }}
+          title={t('workspace.copyInfo')}
+        >
+          ⧉
+        </button>
 
         {/* Close button */}
         <button

@@ -1,6 +1,7 @@
 import * as pty from 'node-pty';
 import os from 'node:os';
-import { getPipeName, ENV_KEYS } from '../../shared/constants';
+import fs from 'node:fs';
+import { getPipeName, ENV_KEYS, getPidMapDir } from '../../shared/constants';
 
 export interface PTYInstance {
   id: string;
@@ -62,7 +63,28 @@ export class PTYManager {
 
     const instance: PTYInstance = { id, process, shell };
     this.instances.set(id, instance);
+
+    // Write PID→workspaceId mapping so MCP servers can resolve identity
+    // (Claude Code doesn't propagate env vars to MCP child processes)
+    if (options?.workspaceId) {
+      this.writePidMap(process.pid, options.workspaceId);
+    }
+
     return instance;
+  }
+
+  private writePidMap(pid: number, workspaceId: string): void {
+    try {
+      const dir = getPidMapDir();
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(`${dir}/${pid}`, workspaceId, 'utf8');
+    } catch { /* best-effort */ }
+  }
+
+  private removePidMap(pid: number): void {
+    try {
+      fs.unlinkSync(`${getPidMapDir()}/${pid}`);
+    } catch { /* best-effort */ }
   }
 
   write(id: string, data: string): void {
@@ -82,6 +104,7 @@ export class PTYManager {
   dispose(id: string): void {
     const instance = this.instances.get(id);
     if (instance) {
+      this.removePidMap(instance.process.pid);
       try { instance.process.kill(); } catch { /* already dead */ }
       this.onDisposeCallback?.(id);
       this.instances.delete(id);

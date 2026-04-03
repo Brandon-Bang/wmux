@@ -37,6 +37,7 @@ export interface Workspace {
   rootPane: Pane;
   activePaneId: string;
   metadata?: WorkspaceMetadata;
+  companyRole?: 'ceo' | 'lead' | 'member';
 }
 
 // === Notification ===
@@ -100,7 +101,7 @@ export interface SessionData {
   autoUpdateEnabled?: boolean;
   customThemeColors?: CustomThemeColors;
   sidebarMode?: 'workspaces' | 'company';
-  company?: { name: string; totalCostEstimate: number } | null;
+  company?: Company | null;
   memberCosts?: Record<string, number>;
   sessionStartTime?: number;
 }
@@ -148,12 +149,37 @@ export interface CustomThemeColors {
   xtermBrightWhite: string;
 }
 
-// === A2A Protocol Types ===
+// === A2A Protocol Types (Google A2A Standard) ===
 
-export type A2aTaskStatus = 'submitted' | 'working' | 'input-required' | 'completed' | 'failed' | 'canceled';
+// --- Part types (kind discriminant, per A2A spec) ---
+
+export type TextPart = { kind: 'text'; text: string; metadata?: Record<string, unknown> };
+export type FilePart = { kind: 'file'; file: { name?: string; mimeType?: string; bytes?: string; uri?: string }; metadata?: Record<string, unknown> };
+export type DataPart = { kind: 'data'; data: Record<string, unknown>; metadata?: Record<string, unknown> };
+export type Part = TextPart | FilePart | DataPart;
+
+// --- Message ---
+
+export interface Message {
+  kind: 'message';
+  messageId: string;
+  role: 'user' | 'agent';
+  parts: Part[];
+  metadata?: Record<string, unknown>;
+}
+
+// --- Task state & status ---
+
+export type TaskState = 'submitted' | 'working' | 'input-required' | 'completed' | 'failed' | 'canceled';
+
+export interface TaskStatus {
+  state: TaskState;
+  message?: Message;
+  timestamp: string; // ISO 8601
+}
 
 /** Valid state transitions for A2A tasks */
-export const VALID_TRANSITIONS: Record<A2aTaskStatus, readonly A2aTaskStatus[]> = {
+export const VALID_TRANSITIONS: Record<TaskState, readonly TaskState[]> = {
   submitted: ['working', 'canceled'],
   working: ['completed', 'failed', 'canceled', 'input-required'],
   'input-required': ['working', 'canceled'],
@@ -163,54 +189,76 @@ export const VALID_TRANSITIONS: Record<A2aTaskStatus, readonly A2aTaskStatus[]> 
 };
 
 /** Validate whether a status transition is allowed */
-export function validateTransition(from: A2aTaskStatus, to: A2aTaskStatus): boolean {
+export function validateTransition(from: TaskState, to: TaskState): boolean {
   const allowed = VALID_TRANSITIONS[from];
   if (!allowed) return false;
   return allowed.includes(to);
 }
 
 /** Terminal states — tasks in these states are eligible for GC */
-export const TERMINAL_STATES: readonly A2aTaskStatus[] = ['completed', 'failed', 'canceled'];
+export const TERMINAL_STATES: readonly TaskState[] = ['completed', 'failed', 'canceled'];
 
-// Parts (TextPart + DataPart only)
-export type A2aTextPart = { type: 'text'; text: string };
-export type A2aDataPart = { type: 'data'; mimeType: string; data: Record<string, unknown> };
-export type A2aPart = A2aTextPart | A2aDataPart;
+// --- Artifact ---
 
-/** Task message (conversation within a task) */
-export interface A2aTaskMessage {
-  role: 'sender' | 'receiver';
-  parts: A2aPart[];
-  timestamp: number;
-}
-
-/** Artifact (task result) */
-export interface A2aArtifact {
-  name: string;
-  parts: A2aPart[];
+export interface Artifact {
+  name?: string;
+  description?: string;
+  parts: Part[];
+  metadata?: Record<string, unknown>;
   index?: number;
+  append?: boolean;
+  lastChunk?: boolean;
 }
 
-/** The core A2A Task model */
-export interface A2aTask {
-  id: string;
-  status: A2aTaskStatus;
+// --- wmux task metadata extension ---
+
+export interface WmuxTaskMetadata {
   title: string;
   from: { workspaceId: string; name: string };
   to: { workspaceId: string; name: string };
-  messages: A2aTaskMessage[];
-  artifacts: A2aArtifact[];
-  createdAt: number;
-  updatedAt: number;
+  createdAt: string; // ISO 8601
+  updatedAt: string; // ISO 8601
+  [key: string]: unknown;
 }
 
-/** Agent Card (lightweight identity + capabilities) */
-export interface AgentCard {
-  workspaceId: string;
+// --- Task (A2A standard + wmux extensions in metadata) ---
+
+export interface Task {
+  kind: 'task';
+  id: string;
+  status: TaskStatus;
+  history: Message[];
+  artifacts: Artifact[];
+  metadata: WmuxTaskMetadata;
+}
+
+// --- Agent discovery ---
+
+export interface AgentSkill {
+  id: string;
   name: string;
-  description: string;
-  skills: string[] | null;  // null = unregistered, [] = registered but empty
-  status: 'idle' | 'busy' | 'offline';
+  description?: string;
+  tags?: string[];
+}
+
+export interface AgentCard {
+  name: string;
+  description?: string;
+  url: string;
+  version: string;
+  capabilities: {
+    streaming?: boolean;
+    pushNotifications?: boolean;
+    stateTransitionHistory?: boolean;
+  };
+  skills: AgentSkill[];
+  defaultInputModes?: string[];
+  defaultOutputModes?: string[];
+  metadata?: {
+    workspaceId: string;
+    status: 'idle' | 'busy' | 'offline';
+    [key: string]: unknown;
+  };
 }
 
 // === Utility: generate unique IDs ===
@@ -407,4 +455,137 @@ export function validateNavigationUrl(url: string): { valid: boolean; reason?: s
 
   return { valid: true };
 }
+
+// === Company Mode Types ===
+
+export type AgentPreset =
+  // Engineering
+  | 'software-architect' | 'backend-architect' | 'frontend-developer' | 'senior-developer'
+  | 'ai-engineer' | 'data-engineer' | 'database-optimizer' | 'devops-automator' | 'sre'
+  | 'security-engineer' | 'code-reviewer' | 'technical-writer'
+  | 'database-architect' | 'security-auditor' | 'test-automator'
+  | 'deployment-engineer' | 'devops-engineer'
+  // Design
+  | 'ui-designer' | 'ux-architect' | 'ux-researcher'
+  | 'brand-guardian' | 'visual-storyteller' | 'image-prompt-engineer'
+  | 'design-system-architect'
+  // Project Management
+  | 'studio-producer' | 'project-shepherd' | 'studio-operations'
+  | 'senior-project-manager' | 'experiment-tracker'
+  | 'project-manager'
+  // Testing
+  | 'accessibility-auditor' | 'api-tester' | 'performance-benchmarker'
+  | 'test-results-analyzer' | 'workflow-optimizer' | 'reality-checker'
+  // Sales
+  | 'sales-coach' | 'account-strategist' | 'deal-strategist'
+  | 'outbound-strategist' | 'pipeline-analyst' | 'sales-engineer'
+  // Marketing
+  | 'seo-specialist' | 'content-creator' | 'growth-hacker'
+  | 'podcast-strategist' | 'linkedin-strategist' | 'tiktok-strategist'
+  | 'content-strategist' | 'social-media-manager'
+  // Product
+  | 'product-manager' | 'feedback-synthesizer' | 'feature-prioritizer' | 'roadmap-strategist'
+  // Specialized
+  | 'agents-orchestrator' | 'workflow-architect' | 'mcp-builder'
+  | 'compliance-auditor' | 'developer-advocate' | 'recruitment-specialist'
+  // Custom
+  | 'custom';
+
+export type MemberStatus = 'idle' | 'running' | 'complete' | 'error' | 'waiting' | 'stuck';
+
+export interface TeamMember {
+  id: string;
+  name: string;
+  preset: AgentPreset;
+  customAgentPath?: string;
+  workspaceId: string;
+  ptyId?: string;
+  status: MemberStatus;
+  lastMessage?: string;
+  lastActivity?: number;
+}
+
+export interface Department {
+  id: string;
+  name: string;
+  leadId: string;
+  members: TeamMember[];
+  worktreeBranch?: string;
+}
+
+export interface Company {
+  id: string;
+  name: string;
+  ceoWorkspaceId?: string;
+  departments: Department[];
+  createdAt: number;
+  totalCostEstimate?: number;
+  skipPermissions?: boolean;
+  workDir?: string;
+}
+
+// Company Templates
+export interface CompanyTemplateMember {
+  name: string;
+  preset: AgentPreset;
+  customAgentPath?: string;
+}
+
+export interface CompanyTemplateDepartment {
+  name: string;
+  leadName: string;
+  leadPrompt?: string;
+  worktreeBranch?: string;
+  members: CompanyTemplateMember[];
+}
+
+export interface CompanyTemplate {
+  name: string;
+  ceo?: { prompt?: string };
+  departments: CompanyTemplateDepartment[];
+}
+
+// Worktree Info
+export interface WorktreeInfo {
+  worktree: string;
+  HEAD: string;
+  branch: string;
+  bare?: boolean;
+}
+
+// Risk Level & Approval
+export type RiskLevel = 'safe' | 'review' | 'critical';
+
+export interface ApprovalRequest {
+  id: string;
+  ptyId: string;
+  memberId: string;
+  memberName: string;
+  departmentName: string;
+  action: string;
+  riskLevel: RiskLevel;
+  timestamp: number;
+}
+
+// Message Routing
+export interface MessageRouteEvent {
+  from: string;
+  to: string;
+  message: string;
+  priority: 'low' | 'normal' | 'high';
+  isBroadcast: boolean;
+}
+
+// A2A Inbox
+export interface InboxMessage {
+  id: string;
+  from: string;
+  to: string;
+  message: string;
+  priority: string;
+  timestamp: number;
+  read: boolean;
+}
+
+export const MAX_INBOX_SIZE = 100;
 

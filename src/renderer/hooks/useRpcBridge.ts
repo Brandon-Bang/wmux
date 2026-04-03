@@ -2,7 +2,9 @@ import { useEffect } from 'react';
 import { useStore } from '../stores';
 import type { Pane, PaneLeaf, Surface } from '../../shared/types';
 import { validateMessage } from '../../shared/types';
-import type { A2aTaskMessage, A2aPart } from '../../shared/types';
+import type { Message, Part, TaskState, Artifact, AgentSkill } from '../../shared/types';
+import { generateId } from '../../shared/types';
+import { handleCompanyRpc } from './companyRpcHandlers';
 import { formatA2aMessage, formatA2aBroadcast } from '../utils/a2aFormat';
 import type { A2aPriority } from '../utils/a2aFormat';
 
@@ -38,11 +40,8 @@ function findLeafBySurfaceId(root: Pane, surfaceId: string): PaneLeaf | null {
 // ---------------------------------------------------------------------------
 
 function submitToPty(ptyId: string, text: string): void {
-  const paste = `\x1b[200~${text}\x1b[201~`;
-  window.electronAPI.pty.write(ptyId, paste);
-  setTimeout(() => {
-    window.electronAPI.pty.write(ptyId, '\r');
-  }, 50);
+  // Direct keyboard input (not bracketed paste) — appears as natural typing
+  window.electronAPI.pty.write(ptyId, text + '\r');
 }
 
 // ---------------------------------------------------------------------------
@@ -186,6 +185,7 @@ async function handleRpcMethod(method: string, params: RpcParams): Promise<RpcRe
     const { id: ptyId } = await window.electronAPI.pty.create({
       shell: shell || undefined,
       cwd: cwd || undefined,
+      workspaceId: ws.id,
     });
 
     // Re-read state after async gap — paneId may have been removed.
@@ -447,8 +447,23 @@ async function handleRpcMethod(method: string, params: RpcParams): Promise<RpcRe
   // a2a.*
   // -------------------------------------------------------------------------
 
+  if (method === 'a2a.resolve.identity') {
+    // Resolve workspace from PTY workspace ID passed via env var
+    const ptyWorkspaceId = typeof params.ptyWorkspaceId === 'string' ? params.ptyWorkspaceId : '';
+    if (ptyWorkspaceId) {
+      const ws = store.workspaces.find((w) => w.id === ptyWorkspaceId);
+      if (ws) return { workspaceId: ws.id };
+    }
+    // Fallback: try to match by PID through surfaces' PTY IDs
+    // (future: PTYManager could track PID→workspace mapping)
+    return { workspaceId: '' };
+  }
+
   if (method === 'a2a.whoami') {
     const workspaceId = typeof params.workspaceId === 'string' ? params.workspaceId : '';
+    if (!workspaceId) {
+      return { error: 'a2a.whoami: workspaceId is required. Ensure WMUX_WORKSPACE_ID is set in the environment.' };
+    }
     const ws = store.workspaces.find((w) => w.id === workspaceId);
     if (!ws) return { error: `no workspace found for ${workspaceId}` };
     return {
@@ -460,13 +475,23 @@ async function handleRpcMethod(method: string, params: RpcParams): Promise<RpcRe
 
   if (method === 'a2a.discover') {
     return {
-      agents: store.workspaces.map((w) => ({
-        workspaceId: w.id,
-        name: w.name,
-        description: w.metadata?.agentName ?? w.name,
-        skills: store.getAgentSkills(w.id),
-        status: (w.metadata?.agentStatus as string) ?? 'idle',
-      })),
+      agents: store.workspaces.map((w) => {
+        const skills = store.getAgentSkills(w.id);
+        return {
+          name: w.name,
+          description: w.metadata?.agentName ?? w.name,
+          url: w.id,
+          version: '1.0',
+          capabilities: { stateTransitionHistory: true },
+          skills: skills
+            ? skills.map((s) => (typeof s === 'string' ? { id: s, name: s } : s))
+            : [],
+          metadata: {
+            workspaceId: w.id,
+            status: (w.metadata?.agentStatus as string) ?? 'idle',
+          },
+        };
+      }),
     };
   }
 
@@ -474,6 +499,7 @@ async function handleRpcMethod(method: string, params: RpcParams): Promise<RpcRe
     const taskId = typeof params.taskId === 'string' ? params.taskId : '';
     const rawMessage = typeof params.message === 'string' ? params.message : '';
     const workspaceId = typeof params.workspaceId === 'string' ? params.workspaceId : '';
+    if (!workspaceId) return { error: 'a2a.task.send: missing "workspaceId". Ensure WMUX_WORKSPACE_ID is set.' };
 
     if (!rawMessage) return { error: 'a2a.task.send: missing "message"' };
     let message: string;
@@ -481,13 +507,13 @@ async function handleRpcMethod(method: string, params: RpcParams): Promise<RpcRe
       return { error: `a2a.task.send: ${e instanceof Error ? e.message : 'invalid'}` };
     }
 
-    // Build parts
-    const parts: A2aPart[] = [{ type: 'text', text: message }];
+    // Build parts (A2A standard: kind discriminant)
+    const parts: Part[] = [{ kind: 'text', text: message }];
     if (params.data && typeof params.data === 'object') {
       parts.push({
-        type: 'data',
-        mimeType: typeof params.dataMimeType === 'string' ? params.dataMimeType : 'application/json',
+        kind: 'data',
         data: params.data as Record<string, unknown>,
+        metadata: { mimeType: typeof params.dataMimeType === 'string' ? params.dataMimeType : 'application/json' },
       });
     }
 
@@ -496,14 +522,15 @@ async function handleRpcMethod(method: string, params: RpcParams): Promise<RpcRe
       const task = store.getTask(taskId);
       if (!task) return { error: `a2a.task.send: task "${taskId}" not found` };
       // Verify caller is sender or receiver of this task
-      if (task.from.workspaceId !== workspaceId && task.to.workspaceId !== workspaceId) {
+      if (task.metadata.from.workspaceId !== workspaceId && task.metadata.to.workspaceId !== workspaceId) {
         return { error: 'a2a.task.send: not authorized to reply to this task' };
       }
-      const role = task.from.workspaceId === workspaceId ? 'sender' : 'receiver';
-      store.addTaskMessage(taskId, { role, parts, timestamp: Date.now() });
+      const role = task.metadata.from.workspaceId === workspaceId ? 'user' : 'agent';
+      const msg: Message = { kind: 'message', messageId: generateId('msg'), role, parts };
+      store.addTaskMessage(taskId, msg);
 
-      // PTY notification to the other party
-      const targetWsId = role === 'sender' ? task.to.workspaceId : task.from.workspaceId;
+      // Deliver reply to the other party's terminal
+      const targetWsId = role === 'user' ? task.metadata.to.workspaceId : task.metadata.from.workspaceId;
       const targetWs = store.workspaces.find((w) => w.id === targetWsId);
       if (targetWs) {
         const senderWs = store.workspaces.find((w) => w.id === workspaceId);
@@ -521,24 +548,40 @@ async function handleRpcMethod(method: string, params: RpcParams): Promise<RpcRe
     const sender = store.workspaces.find((w) => w.id === workspaceId);
     const fromName = sender?.name ?? `unknown-${workspaceId.substring(0, 8)}`;
 
-    const target = store.workspaces.find(
-      (w) => w.id === to || w.name.toLowerCase() === to.toLowerCase(),
-    );
-    if (!target) return { error: `a2a.task.send: target "${to}" not found` };
+    const toNorm = to.toLowerCase().trim();
+    // Extract number from inputs like "3번", "3", "ws3", "workspace 3", "#3"
+    const numMatch = toNorm.match(/^#?(?:ws|workspace\s*)?(\d+)(?:번)?$/);
+    const targetNum = numMatch ? parseInt(numMatch[1], 10) : NaN;
+
+    const target = store.workspaces.find((w) => {
+      if (w.id === to) return true;
+      if (w.name.toLowerCase() === toNorm) return true;
+      // Match by workspace number (1-indexed)
+      if (!isNaN(targetNum)) {
+        const wsNumMatch = w.name.match(/(\d+)/);
+        if (wsNumMatch && parseInt(wsNumMatch[1], 10) === targetNum) return true;
+      }
+      // Partial name match
+      if (w.name.toLowerCase().includes(toNorm)) return true;
+      return false;
+    });
+    if (!target) {
+      const available = store.workspaces.map((w) => w.name).join(', ');
+      return { error: `a2a.task.send: target "${to}" not found. Available: ${available}` };
+    }
     if (target.id === workspaceId) return { error: 'a2a.task.send: cannot send to yourself' };
 
-    const initialMessage: A2aTaskMessage = { role: 'sender', parts, timestamp: Date.now() };
+    const initialMessage: Message = { kind: 'message', messageId: generateId('msg'), role: 'user', parts };
 
     const newTaskId = store.createA2aTask({
       title: title || message.slice(0, 100),
-      status: 'submitted',
       from: { workspaceId, name: fromName },
       to: { workspaceId: target.id, name: target.name },
-      messages: [initialMessage],
+      history: [initialMessage],
       artifacts: [],
     });
 
-    // Deliver formatted message to target's active terminal PTY
+    // Deliver message to target workspace's terminal
     deliverPtyNotification(target, fromName, message);
 
     return { ok: true, taskId: newTaskId };
@@ -546,9 +589,9 @@ async function handleRpcMethod(method: string, params: RpcParams): Promise<RpcRe
 
   if (method === 'a2a.task.query') {
     const workspaceId = typeof params.workspaceId === 'string' ? params.workspaceId : '';
-    if (!workspaceId) return { error: 'a2a.task.query: missing "workspaceId"' };
-    const status = typeof params.status === 'string' ? params.status as any : undefined;
-    const role = typeof params.role === 'string' ? params.role as 'sender' | 'receiver' : undefined;
+    if (!workspaceId) return { error: 'a2a.task.query: missing "workspaceId". Ensure WMUX_WORKSPACE_ID is set.' };
+    const status = typeof params.status === 'string' ? params.status as TaskState : undefined;
+    const role = typeof params.role === 'string' ? params.role as 'user' | 'agent' : undefined;
     const tasks = store.queryTasks(workspaceId, { status, role });
     return { workspaceId, tasks };
   }
@@ -557,7 +600,7 @@ async function handleRpcMethod(method: string, params: RpcParams): Promise<RpcRe
     const taskId = typeof params.taskId === 'string' ? params.taskId : '';
     const workspaceId = typeof params.workspaceId === 'string' ? params.workspaceId : '';
     if (!taskId) return { error: 'a2a.task.update: missing "taskId"' };
-    if (!workspaceId) return { error: 'a2a.task.update: missing "workspaceId"' };
+    if (!workspaceId) return { error: 'a2a.task.update: missing "workspaceId". Ensure WMUX_WORKSPACE_ID is set.' };
 
     // Update status if provided
     if (typeof params.status === 'string') {
@@ -570,7 +613,7 @@ async function handleRpcMethod(method: string, params: RpcParams): Promise<RpcRe
       if (!validStatuses.includes(params.status)) {
         return { error: `a2a.task.update: invalid status "${params.status}"` };
       }
-      const result = store.updateTaskStatus(taskId, params.status as any, workspaceId);
+      const result = store.updateTaskStatus(taskId, params.status as TaskState, workspaceId);
       if (!result.ok) return { error: `a2a.task.update: ${result.error}` };
     }
 
@@ -584,16 +627,17 @@ async function handleRpcMethod(method: string, params: RpcParams): Promise<RpcRe
       // Verify caller is sender or receiver of this task
       const task = store.getTask(taskId);
       if (!task) return { error: 'a2a.task.update: task not found' };
-      if (task.from.workspaceId !== workspaceId && task.to.workspaceId !== workspaceId) {
+      if (task.metadata.from.workspaceId !== workspaceId && task.metadata.to.workspaceId !== workspaceId) {
         return { error: 'a2a.task.update: not authorized' };
       }
-      const role = task.from.workspaceId === workspaceId ? 'sender' : 'receiver';
+      const role = task.metadata.from.workspaceId === workspaceId ? 'user' : 'agent';
 
-      const parts: A2aPart[] = [{ type: 'text', text: message }];
-      store.addTaskMessage(taskId, { role, parts, timestamp: Date.now() });
+      const parts: Part[] = [{ kind: 'text', text: message }];
+      const msg: Message = { kind: 'message', messageId: generateId('msg'), role, parts };
+      store.addTaskMessage(taskId, msg);
 
-      // Deliver to the other party's terminal
-      const targetWsId = role === 'sender' ? task.to.workspaceId : task.from.workspaceId;
+      // Deliver update to the other party's terminal
+      const targetWsId = role === 'user' ? task.metadata.to.workspaceId : task.metadata.from.workspaceId;
       const targetWs = store.workspaces.find((w) => w.id === targetWsId);
       if (targetWs) {
         const callerWs = store.workspaces.find((w) => w.id === workspaceId);
@@ -604,8 +648,8 @@ async function handleRpcMethod(method: string, params: RpcParams): Promise<RpcRe
 
     // Add artifact if provided
     if (params.artifact && typeof params.artifact === 'object') {
-      const artifact = params.artifact as { name?: string; parts?: A2aPart[] };
-      if (artifact.name && artifact.parts) {
+      const artifact = params.artifact as { name?: string; parts?: Part[] };
+      if (artifact.parts) {
         store.addTaskArtifact(taskId, { name: artifact.name, parts: artifact.parts });
       }
     }
@@ -617,7 +661,7 @@ async function handleRpcMethod(method: string, params: RpcParams): Promise<RpcRe
     const taskId = typeof params.taskId === 'string' ? params.taskId : '';
     const workspaceId = typeof params.workspaceId === 'string' ? params.workspaceId : '';
     if (!taskId) return { error: 'a2a.task.cancel: missing "taskId"' };
-    if (!workspaceId) return { error: 'a2a.task.cancel: missing "workspaceId"' };
+    if (!workspaceId) return { error: 'a2a.task.cancel: missing "workspaceId". Ensure WMUX_WORKSPACE_ID is set.' };
     const result = store.cancelTask(taskId, workspaceId);
     if (!result.ok) return { error: `a2a.task.cancel: ${result.error}` };
     return { ok: true, taskId };
@@ -626,7 +670,7 @@ async function handleRpcMethod(method: string, params: RpcParams): Promise<RpcRe
   if (method === 'a2a.broadcast') {
     const rawMessage = typeof params.message === 'string' ? params.message : '';
     const workspaceId = typeof params.workspaceId === 'string' ? params.workspaceId : '';
-    const priority = (typeof params.priority === 'string' ? params.priority : 'normal') as A2aPriority;
+    if (!workspaceId) return { error: 'a2a.broadcast: missing "workspaceId". Ensure WMUX_WORKSPACE_ID is set.' };
     if (!rawMessage) return { error: 'a2a.broadcast: missing "message"' };
     let message: string;
     try { message = validateMessage(rawMessage); } catch (e) {
@@ -634,8 +678,9 @@ async function handleRpcMethod(method: string, params: RpcParams): Promise<RpcRe
     }
 
     const sender = store.workspaces.find((w) => w.id === workspaceId);
-    const fromName = sender?.name ?? `unknown-${workspaceId.substring(0, 8)}`;
+    const fromName = sender?.name ?? workspaceId.substring(0, 8);
 
+    // Deliver to all other workspaces via PTY paste
     let sent = 0;
     for (const ws of store.workspaces) {
       if (ws.id === workspaceId) continue;
@@ -643,7 +688,7 @@ async function handleRpcMethod(method: string, params: RpcParams): Promise<RpcRe
       for (const leaf of leaves) {
         const termSurface = leaf.surfaces.find((s) => s.surfaceType !== 'browser' && s.ptyId);
         if (termSurface) {
-          const formatted = formatA2aBroadcast(fromName, message, priority);
+          const formatted = formatA2aBroadcast(fromName, message);
           submitToPty(termSurface.ptyId, formatted);
           break;
         }
@@ -655,10 +700,23 @@ async function handleRpcMethod(method: string, params: RpcParams): Promise<RpcRe
 
   if (method === 'meta.setSkills') {
     const workspaceId = typeof params.workspaceId === 'string' ? params.workspaceId : '';
-    const skills = Array.isArray(params.skills) ? params.skills as string[] : [];
-    if (!workspaceId) return { error: 'meta.setSkills: missing "workspaceId"' };
+    const rawSkills = Array.isArray(params.skills) ? params.skills : [];
+    if (!workspaceId) return { error: 'meta.setSkills: missing "workspaceId". Ensure WMUX_WORKSPACE_ID is set.' };
+    // Accept string[] (from MCP) and convert to AgentSkill[]
+    const skills: AgentSkill[] = rawSkills.map((s: unknown) =>
+      typeof s === 'string' ? { id: s, name: s } : s as AgentSkill,
+    );
     store.setAgentSkills(workspaceId, skills);
     return { ok: true };
+  }
+
+  // -------------------------------------------------------------------------
+  // company.* — Company mode handlers
+  // -------------------------------------------------------------------------
+
+  if (method.startsWith('company.')) {
+    const result = await handleCompanyRpc(method, params, store);
+    if (result !== null) return result;
   }
 
   // -------------------------------------------------------------------------

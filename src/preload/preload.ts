@@ -3,7 +3,7 @@ import { IPC } from '../shared/constants';
 
 const electronAPI = {
   pty: {
-    create: (options?: { shell?: string; cwd?: string; cols?: number; rows?: number }) =>
+    create: (options?: { shell?: string; cwd?: string; cols?: number; rows?: number; workspaceId?: string; surfaceId?: string }) =>
       ipcRenderer.invoke(IPC.PTY_CREATE, options),
     write: (id: string, data: string) => {
       ipcRenderer.send(IPC.PTY_WRITE, id, data);

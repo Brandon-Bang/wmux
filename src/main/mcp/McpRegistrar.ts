@@ -55,6 +55,16 @@ export class McpRegistrar {
 
       this.registerInClaudeJson('wmux', mcpEntry);
 
+      // Register wmux-a2a MCP server (Agent-to-Agent communication)
+      const a2aScript = this.getA2aScriptPath();
+      if (a2aScript) {
+        this.registerInClaudeJson('wmux-a2a', {
+          command: 'node',
+          args: [a2aScript],
+        });
+        console.log(`[McpRegistrar] Registered wmux-a2a MCP → ${a2aScript}`);
+      }
+
       // Clean up legacy MCP keys from previous versions
       this.removeLegacyKeys(['wmux-playwright', 'wmux-devtools']);
 
@@ -164,6 +174,29 @@ export class McpRegistrar {
       const parent = path.resolve(current, '..');
       if (parent === current) break;
       const candidate = path.join(parent, 'dist', 'mcp', 'mcp', 'index.js');
+      if (fs.existsSync(candidate)) return candidate;
+      current = parent;
+    }
+
+    return null;
+  }
+
+  private getA2aScriptPath(): string | null {
+    if (app.isPackaged) {
+      const bundlePath = path.join(process.resourcesPath, 'a2a-bundle', 'index.js');
+      if (fs.existsSync(bundlePath)) return bundlePath;
+      return null;
+    }
+
+    const appPath = app.getAppPath();
+    const devPath = path.join(appPath, 'dist', 'mcp', 'mcp', 'a2a', 'index.js');
+    if (fs.existsSync(devPath)) return devPath;
+
+    let current = appPath;
+    for (let i = 0; i < 5; i++) {
+      const parent = path.resolve(current, '..');
+      if (parent === current) break;
+      const candidate = path.join(parent, 'dist', 'mcp', 'mcp', 'a2a', 'index.js');
       if (fs.existsSync(candidate)) return candidate;
       current = parent;
     }

@@ -270,6 +270,14 @@ function registerRpcHandlers(
     const uptime = Math.floor((Date.now() - startTime) / 1000);
     return { status: 'ok', uptime, sessions: sessions.length };
   });
+
+  // daemon.shutdown — gracefully terminate the daemon process
+  pipeServer.onRpc('daemon.shutdown', async () => {
+    log('info', 'Shutdown requested via RPC');
+    // Respond first, then initiate shutdown on next tick
+    setImmediate(() => process.emit('SIGTERM' as any));
+    return { status: 'ok' };
+  });
 }
 
 // === Event wiring ===

@@ -342,8 +342,13 @@ app.on('before-quit', async (e) => {
   cleanupHandlers();
 
   if (daemonClient?.isConnected) {
-    // Daemon mode: detach only — sessions persist in daemon
-    console.log('[Main] Daemon mode — detaching sessions (not killing)');
+    // Daemon mode: shut down the daemon process together with the app
+    console.log('[Main] Daemon mode — sending shutdown RPC');
+    try {
+      await daemonClient.rpc('daemon.shutdown', {});
+    } catch {
+      // Daemon may already be gone — ignore
+    }
     await daemonClient.disconnect();
     daemonClient = null;
   } else {

@@ -1,36 +1,18 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="none">
-  <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="256" y2="256" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#1e1e2e"/>
-      <stop offset="100%" stop-color="#14141f"/>
-    </linearGradient>
-    <linearGradient id="mark" x1="64" y1="56" x2="192" y2="200" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#89b4fa"/>
-      <stop offset="100%" stop-color="#74c7ec"/>
-    </linearGradient>
-  </defs>
+  <!-- Black background -->
+  <rect width="256" height="256" fill="#000000"/>
 
-  <!-- Background -->
-  <rect width="256" height="256" rx="52" fill="url(#bg)"/>
-
-  <!-- W — bold -->
+  <!-- White chevron (>) on the left -->
   <path d="
-    M 24 62
-    L 60 62
-    L 90 158
-    L 128 72
-    L 166 158
-    L 196 62
-    L 232 62
-    L 180 204
-    L 150 204
-    L 128 148
-    L 106 204
-    L 76 204
+    M 0 0
+    L 108 128
+    L 0 256
+    L 56 256
+    L 164 128
+    L 56 0
     Z
-  " fill="url(#mark)"/>
+  " fill="#FFFFFF"/>
 
-  <!-- Two dots below each V valley — hidden Y hint -->
-  <circle cx="90" cy="216" r="7" fill="url(#mark)" opacity="0.5"/>
-  <circle cx="166" cy="216" r="7" fill="url(#mark)" opacity="0.5"/>
+  <!-- White W in bottom right -->
+  <text x="148" y="240" font-family="Arial Black, Arial, sans-serif" font-weight="900" font-size="96" fill="#FFFFFF">W</text>
 </svg>

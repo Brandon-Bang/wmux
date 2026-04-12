@@ -155,6 +155,9 @@ async function handleRpcMethod(method: string, params: RpcParams): Promise<RpcRe
     if (!ws) return [];
     // Search ALL leaf panes, not just active — so MCP can find browser surfaces anywhere
     const leaves = findLeafPanes(ws.rootPane);
+    // Use workspace metadata cwd/gitBranch as the live values (updated via shell integration)
+    const liveCwd = ws.metadata?.cwd;
+    const liveGitBranch = ws.metadata?.gitBranch;
     const surfaces = [];
     for (const leaf of leaves) {
       for (const s of leaf.surfaces) {
@@ -163,7 +166,8 @@ async function handleRpcMethod(method: string, params: RpcParams): Promise<RpcRe
           ptyId: s.ptyId,
           title: s.title,
           shell: s.shell,
-          cwd: s.cwd,
+          cwd: liveCwd || s.cwd,
+          gitBranch: liveGitBranch,
           surfaceType: s.surfaceType || 'terminal',
           browserUrl: s.browserUrl,
           paneId: leaf.id,
@@ -253,12 +257,20 @@ async function handleRpcMethod(method: string, params: RpcParams): Promise<RpcRe
   if (method === 'pane.list') {
     const ws = store.workspaces.find((w) => w.id === store.activeWorkspaceId);
     if (!ws) return [];
+    const liveCwd = ws.metadata?.cwd;
+    const liveGitBranch = ws.metadata?.gitBranch;
     const leaves = findLeafPanes(ws.rootPane);
-    return leaves.map((l) => ({
-      id: l.id,
-      surfaceCount: l.surfaces.length,
-      active: l.id === ws.activePaneId,
-    }));
+    return leaves.map((l) => {
+      // Use the first terminal surface's cwd as the pane's cwd, prefer live metadata
+      const firstSurface = l.surfaces.find((s) => s.surfaceType !== 'browser');
+      return {
+        id: l.id,
+        surfaceCount: l.surfaces.length,
+        active: l.id === ws.activePaneId,
+        cwd: liveCwd || firstSurface?.cwd,
+        gitBranch: liveGitBranch,
+      };
+    });
   }
 
   if (method === 'pane.focus') {

@@ -50,6 +50,12 @@ const electronAPI = {
       ipcRenderer.on(IPC.CWD_CHANGED, listener);
       return () => { ipcRenderer.removeListener(IPC.CWD_CHANGED, listener); };
     },
+    onGitBranchChanged: (callback: (ptyId: string, branch: string) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, ptyId: string, branch: string) =>
+        callback(ptyId, branch);
+      ipcRenderer.on(IPC.GIT_BRANCH_CHANGED, listener);
+      return () => { ipcRenderer.removeListener(IPC.GIT_BRANCH_CHANGED, listener); };
+    },
   },
   metadata: {
     request: (ptyId: string) =>

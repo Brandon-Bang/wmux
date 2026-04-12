@@ -98,6 +98,17 @@ export function useNotificationListener() {
       }
     });
 
+    const unsubGitBranch = window.electronAPI.notification.onGitBranchChanged((ptyId, branch) => {
+      const state = useStore.getState();
+      for (const ws of state.workspaces) {
+        const found = findSurfaceByPtyId(ws.rootPane, ptyId);
+        if (found) {
+          state.updateWorkspaceMetadata(ws.id, { gitBranch: branch });
+          break;
+        }
+      }
+    });
+
     const unsubToken = window.electronAPI.token.onUpdate((ptyId, data) => {
       useStore.getState().updateTokenData(ptyId, data);
     });
@@ -106,6 +117,7 @@ export function useNotificationListener() {
       unsubNotif();
       unsubCwd();
       unsubMeta();
+      unsubGitBranch();
       unsubToken();
     };
   }, []);

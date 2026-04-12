@@ -6,7 +6,7 @@ import { TokenTracker } from './TokenTracker';
 import { ActivityMonitor } from './ActivityMonitor';
 import { toastManager } from '../pipe/handlers/notify.rpc';
 import { IPC } from '../../shared/constants';
-import { updateCwd, removeCwd } from '../ipc/handlers/metadata.handler';
+import { updateCwd, removeCwd, updateBranch, removeBranch } from '../ipc/handlers/metadata.handler';
 
 /**
  * A middleware handler receives raw data from a PTY process.
@@ -84,6 +84,7 @@ export class PTYBridge {
     this.activityMonitor.stop(ptyId);
     this.middlewareStacks.delete(ptyId);
     removeCwd(ptyId);
+    removeBranch(ptyId);
     this.ptyManager.remove(ptyId);
   }
 
@@ -144,7 +145,8 @@ export class PTYBridge {
           break;
         }
         case 7727: {
-          // Git branch update from shell hook
+          // Git branch update from shell hook — store in main process and notify renderer
+          updateBranch(ptyId, event.data);
           win.webContents.send(IPC.GIT_BRANCH_CHANGED, ptyId, event.data);
           break;
         }

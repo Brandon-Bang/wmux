@@ -105,6 +105,7 @@ export interface SessionData {
   memberCosts?: Record<string, number>;
   sessionStartTime?: number;
   tokenDataByPty?: Record<string, { totalTokens: number; inputTokens: number; outputTokens: number; totalCost: number; lastUpdate: number }>;
+  onboardingCompleted?: boolean;
 }
 
 // === Custom Theme Colors ===

@@ -12,6 +12,7 @@ import FileTreePanel from '../FileTree/FileTreePanel';
 import ApprovalDialog from '../Company/ApprovalDialog';
 import CompanyView from '../Company/CompanyView';
 import MessageFeedPanel from '../Company/MessageFeedPanel';
+import OnboardingOverlay from '../Onboarding/OnboardingOverlay';
 import { ErrorBoundary } from '../ErrorBoundary';
 import { useKeyboard } from '../../hooks/useKeyboard';
 import { useNotificationListener } from '../../hooks/useNotificationListener';
@@ -125,6 +126,7 @@ function buildSessionData(dumped: Map<string, boolean>): SessionData {
     customKeybindings: state.customKeybindings,
     autoUpdateEnabled: state.autoUpdateEnabled,
     customThemeColors: state.customThemeColors ?? undefined,
+    onboardingCompleted: state.onboardingCompleted,
   };
 }
 
@@ -144,6 +146,11 @@ export default function AppLayout() {
   const clearMultiview = useStore((s) => s.clearMultiview);
   const setActiveWorkspace = useStore((s) => s.setActiveWorkspace);
   const activeWorkspace = workspaces.find((w) => w.id === activeWorkspaceId);
+
+  const onboardingActive = useStore((s) => s.onboardingActive);
+  const onboardingCompleted = useStore((s) => s.onboardingCompleted);
+  const startOnboarding = useStore((s) => s.startOnboarding);
+  const completeOnboarding = useStore((s) => s.completeOnboarding);
 
   const [showAutoUpdatePrompt, setShowAutoUpdatePrompt] = useState(false);
   const t = useT();
@@ -283,6 +290,14 @@ export default function AppLayout() {
       await reconcilePtys();
     });
   }, []);
+
+  // ─── First-run onboarding detection ─────────────────────────────────
+  useEffect(() => {
+    if (!sessionLoadedRef.current) return;
+    if (!onboardingCompleted && workspaces.length === 1) {
+      startOnboarding();
+    }
+  }, [onboardingCompleted, workspaces.length, startOnboarding]);
 
   // Re-reconcile when daemon connects late (race condition:
   // renderer may have already reconciled with empty pty list
@@ -463,6 +478,10 @@ export default function AppLayout() {
       <CommandPalette />
       <SettingsPanel />
       <ApprovalDialog />
+
+      {onboardingActive && (
+        <OnboardingOverlay onComplete={() => { completeOnboarding(); }} />
+      )}
 
       {/* First-run auto-update prompt */}
       {showAutoUpdatePrompt && (

@@ -186,6 +186,7 @@ export const createWorkspaceSlice: StateCreator<StoreState, [['zustand/immer', n
       if (data.memberCosts) state.memberCosts = data.memberCosts;
       if (data.sessionStartTime != null) state.sessionStartTime = data.sessionStartTime;
       if (data.tokenDataByPty) state.tokenDataByPty = data.tokenDataByPty;
+      if (data.onboardingCompleted != null) state.onboardingCompleted = data.onboardingCompleted;
     }),
   };
 };

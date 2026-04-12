@@ -235,14 +235,7 @@ ipcMain.handle('browser:register-webview', async (_event, surfaceId: string, web
 
 console.log('[DEBUG] registering app.on(ready)');
 app.on('ready', async () => {
-  console.log('[Main] App ready, creating window and starting daemon in parallel...');
-
-  // Start daemon spawn BEFORE window creation — runs in parallel
-  const daemonPromise = ensureDaemon().catch((err) => {
-    console.warn('[Main] Daemon auto-start failed, using local PTY:', err);
-    return null;
-  });
-
+  console.log('[Main] App ready, creating window...');
   mainWindow = createWindow();
   console.log(`[Main] Window created: ${!!mainWindow}`);
 
@@ -250,8 +243,7 @@ app.on('ready', async () => {
 
   // Auto-start daemon and connect
   try {
-    const daemonInfo = await daemonPromise;
-    if (!daemonInfo) throw new Error('Daemon start failed (caught above)');
+    const daemonInfo = await ensureDaemon();
     console.log(`[Main] Daemon ${daemonInfo.spawned ? 'spawned' : 'found'} (PID: ${daemonInfo.pid})`);
 
     const client = new DaemonClient(daemonInfo.pipeName, daemonInfo.authToken);

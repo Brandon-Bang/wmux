@@ -23,3 +23,19 @@
 - **Cons:** 문서 작성/유지 비용
 - **Context:** /design-consultation 스킬로 자동 생성 가능. 기존 themes.ts의 CSS 변수, StatusBar/Sidebar의 스타일 패턴에서 추출.
 - **Depends on:** v1.0 출시 후
+
+## destroyCompanyWithCleanup race condition
+- **What:** PTY dispose가 완료되기 전에 store.destroyCompany()가 호출되는 레이스 컨디션 수정
+- **Why:** dispose 중 UI 리렌더가 company === null을 만나 에러 가능성. 기존 inline 코드에도 동일한 문제가 있었음.
+- **Pros:** company mode 종료 시 안정성 향상
+- **Cons:** async/await 변환 필요
+- **Context:** `src/company/renderer/provisioner.ts` destroyCompanyWithCleanup. await Promise.all(disposePromises) 후 destroyCompany() 호출하도록 변경.
+- **Depends on:** 없음
+
+## Member workspace PTY leak on company destroy
+- **What:** company destroy 시 member workspace 내 분할된 pane의 PTY가 정리되지 않는 문제
+- **Why:** m.ptyId만 dispose하고 workspace 내 다른 surface의 PTY는 무시됨
+- **Pros:** 메모리 누수 방지
+- **Cons:** collectLeafSurfaces로 workspace별 PTY 수집 로직 필요
+- **Context:** `src/company/renderer/provisioner.ts` 및 기존 CompanyPanel.tsx의 destroy 로직
+- **Depends on:** 없음

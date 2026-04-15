@@ -116,6 +116,12 @@ export interface UISlice {
   completeOnboarding: () => void;
   skipOnboarding: () => void;
 
+  // ─── Prefix mode (tmux-style) ─────────────────────────────────────
+  prefixMode: boolean;
+  prefixError: string | null;
+  setPrefixMode: (active: boolean) => void;
+  setPrefixError: (msg: string | null) => void;
+
 }
 
 export const createUISlice: StateCreator<StoreState, [['zustand/immer', never]], [], UISlice> = (set, get) => ({
@@ -241,7 +247,7 @@ export const createUISlice: StateCreator<StoreState, [['zustand/immer', never]],
   }),
 
   // ─── Theme ──────────────────────────────────────────────────────────────
-  theme: 'hinomaru',
+  theme: 'catppuccin-mocha',
 
   setTheme: (theme) => {
     document.documentElement.setAttribute('data-theme', theme);
@@ -410,6 +416,19 @@ export const createUISlice: StateCreator<StoreState, [['zustand/immer', never]],
   skipOnboarding: () => set((state) => {
     state.onboardingActive = false;
     state.onboardingCompleted = true;
+  }),
+
+  // ─── Prefix mode (tmux-style) ─────────────────────────────────────
+  prefixMode: false,
+  prefixError: null,
+
+  setPrefixMode: (active) => set((state) => {
+    state.prefixMode = active;
+    if (!active) state.prefixError = null;
+  }),
+
+  setPrefixError: (msg) => set((state) => {
+    state.prefixError = msg;
   }),
 
 });

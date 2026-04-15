@@ -1,45 +1,14 @@
 import type { StateCreator } from 'zustand';
 import type { StoreState } from '../index';
-import type { Pane, PaneLeaf, PaneBranch, Workspace } from '../../../shared/types';
+import type { PaneBranch, Workspace } from '../../../shared/types';
 import { createLeafPane, generateId } from '../../../shared/types';
+import { findPane, findParent, getLeafPanes } from '../../../shared/paneUtils';
 
 export interface PaneSlice {
   splitPane: (paneId: string, direction: 'horizontal' | 'vertical') => void;
   closePane: (paneId: string) => void;
   setActivePane: (paneId: string) => void;
   focusPaneDirection: (direction: 'up' | 'down' | 'left' | 'right') => void;
-}
-
-function findPane(root: Pane, id: string): Pane | null {
-  if (root.id === id) return root;
-  if (root.type === 'branch') {
-    for (const child of root.children) {
-      const found = findPane(child, id);
-      if (found) return found;
-    }
-  }
-  return null;
-}
-
-function findParent(root: Pane, id: string): PaneBranch | null {
-  if (root.type === 'branch') {
-    for (const child of root.children) {
-      if (child.id === id) return root;
-      const found = findParent(child, id);
-      if (found) return found;
-    }
-  }
-  return null;
-}
-
-function collectLeafIds(pane: Pane): string[] {
-  if (pane.type === 'leaf') return [pane.id];
-  return pane.children.flatMap(collectLeafIds);
-}
-
-function getLeafPanes(root: Pane): PaneLeaf[] {
-  if (root.type === 'leaf') return [root];
-  return root.children.flatMap(getLeafPanes);
 }
 
 export const createPaneSlice: StateCreator<StoreState, [['zustand/immer', never]], [], PaneSlice> = (set, get) => ({

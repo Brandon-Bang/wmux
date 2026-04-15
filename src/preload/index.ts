@@ -98,6 +98,9 @@ const electronAPI = {
       return () => { ipcRenderer.removeListener(IPC.TOKEN_UPDATE, listener); };
     },
   },
+  window: {
+    hide: () => ipcRenderer.send(IPC.WINDOW_HIDE),
+  },
   scrollback: {
     dump: (surfaceId: string, content: string) =>
       ipcRenderer.invoke(IPC.SCROLLBACK_DUMP, surfaceId, content),

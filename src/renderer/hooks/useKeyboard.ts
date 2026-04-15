@@ -23,28 +23,69 @@ const PREFIX_TIMEOUT_MS = 2000;
 /** How long to show "Unknown: [key]" error */
 const PREFIX_ERROR_DISPLAY_MS = 500;
 
-// Prefix mode command map — placeholder handlers for T2
-const prefixCommands: Record<string, () => void> = {
-  '%': () => { /* T2: vertical split */ },
-  '"': () => { /* T2: horizontal split */ },
-  'x': () => { /* T2: close pane */ },
-  'c': () => { /* T2: new workspace */ },
-  'n': () => { /* T2: next workspace */ },
-  'p': () => { /* T2: previous workspace */ },
-  'd': () => { /* T2: detach/tray */ },
-  'z': () => { /* T2: zoom pane */ },
-  ':': () => { /* T2: command palette */ },
-  'ArrowUp': () => { /* T2: focus up */ },
-  'ArrowDown': () => { /* T2: focus down */ },
-  'ArrowLeft': () => { /* T2: focus left */ },
-  'ArrowRight': () => { /* T2: focus right */ },
-};
+/** Dispose all PTYs inside a pane tree */
+function disposePanePtys(pane: import('../../shared/types').Pane): void {
+  if (pane.type === 'leaf') {
+    for (const s of pane.surfaces) {
+      if (s.ptyId) window.electronAPI.pty.dispose(s.ptyId);
+    }
+  } else {
+    for (const child of pane.children) disposePanePtys(child);
+  }
+}
 
 export function useKeyboard() {
   const store = useStore;
   const prefixTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
+    // Prefix mode command map — real implementations
+    const prefixCommands: Record<string, () => void> = {
+      '%': () => {
+        const state = store.getState();
+        const ws = state.workspaces.find((w) => w.id === state.activeWorkspaceId);
+        if (ws) state.splitPane(ws.activePaneId, 'horizontal');
+      },
+      '"': () => {
+        const state = store.getState();
+        const ws = state.workspaces.find((w) => w.id === state.activeWorkspaceId);
+        if (ws) state.splitPane(ws.activePaneId, 'vertical');
+      },
+      'x': () => {
+        const state = store.getState();
+        const ws = state.workspaces.find((w) => w.id === state.activeWorkspaceId);
+        if (!ws) return;
+        const activeLeaf = findLeaf(ws.rootPane, ws.activePaneId);
+        if (activeLeaf) disposePanePtys(activeLeaf);
+        state.closePane(ws.activePaneId);
+      },
+      'c': () => { store.getState().addWorkspace(); },
+      'n': () => {
+        const { workspaces, activeWorkspaceId } = store.getState();
+        if (workspaces.length <= 1) return;
+        const currentIdx = workspaces.findIndex((w) => w.id === activeWorkspaceId);
+        const nextIdx = (currentIdx + 1) % workspaces.length;
+        store.getState().setActiveWorkspace(workspaces[nextIdx].id);
+      },
+      'p': () => {
+        const { workspaces, activeWorkspaceId } = store.getState();
+        if (workspaces.length <= 1) return;
+        const currentIdx = workspaces.findIndex((w) => w.id === activeWorkspaceId);
+        const prevIdx = (currentIdx - 1 + workspaces.length) % workspaces.length;
+        store.getState().setActiveWorkspace(workspaces[prevIdx].id);
+      },
+      'd': () => { window.electronAPI.window.hide(); },
+      'z': () => {
+        const state = store.getState();
+        const ws = state.workspaces.find((w) => w.id === state.activeWorkspaceId);
+        if (ws) state.togglePaneZoom(ws.activePaneId);
+      },
+      ':': () => { store.getState().toggleCommandPalette(); },
+      'ArrowUp': () => { store.getState().focusPaneDirection('up'); },
+      'ArrowDown': () => { store.getState().focusPaneDirection('down'); },
+      'ArrowLeft': () => { store.getState().focusPaneDirection('left'); },
+      'ArrowRight': () => { store.getState().focusPaneDirection('right'); },
+    };
     /** Clear the prefix timeout if running */
     const clearPrefixTimeout = () => {
       if (prefixTimeoutRef.current !== null) {

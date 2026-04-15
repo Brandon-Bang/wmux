@@ -42,13 +42,13 @@ export const IPC = {
   FS_WATCH: 'fs:watch',
   FS_UNWATCH: 'fs:unwatch',
   FS_CHANGED: 'fs:changed',
-  // File write (company persona injection)
-  FS_WRITE_FILE: 'fs:write-file',
   // Scrollback persistence
   SCROLLBACK_DUMP: 'scrollback:dump',
   SCROLLBACK_LOAD: 'scrollback:load',
   // Token tracking
   TOKEN_UPDATE: 'token:update',
+  // Window control
+  WINDOW_HIDE: 'window:hide',
 } as const;
 
 // Named Pipe / Unix socket path for wmux API

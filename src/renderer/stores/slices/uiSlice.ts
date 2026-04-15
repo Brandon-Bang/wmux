@@ -122,6 +122,10 @@ export interface UISlice {
   setPrefixMode: (active: boolean) => void;
   setPrefixError: (msg: string | null) => void;
 
+  // ─── Pane zoom ────────────────────────────────────────────────────
+  zoomedPaneId: string | null;
+  togglePaneZoom: (paneId: string) => void;
+
 }
 
 export const createUISlice: StateCreator<StoreState, [['zustand/immer', never]], [], UISlice> = (set, get) => ({
@@ -429,6 +433,13 @@ export const createUISlice: StateCreator<StoreState, [['zustand/immer', never]],
 
   setPrefixError: (msg) => set((state) => {
     state.prefixError = msg;
+  }),
+
+  // ─── Pane zoom ────────────────────────────────────────────────────
+  zoomedPaneId: null,
+
+  togglePaneZoom: (paneId) => set((state) => {
+    state.zoomedPaneId = state.zoomedPaneId === paneId ? null : paneId;
   }),
 
 });

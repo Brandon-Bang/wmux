@@ -9,9 +9,10 @@ import NotificationPanel from '../Notification/NotificationPanel';
 import CommandPalette from '../Palette/CommandPalette';
 import SettingsPanel from '../Settings/SettingsPanel';
 import FileTreePanel from '../FileTree/FileTreePanel';
-import ApprovalDialog from '../../../company/renderer/components/ApprovalDialog';
-import CompanyView from '../../../company/renderer/components/CompanyView';
-import MessageFeedPanel from '../../../company/renderer/components/MessageFeedPanel';
+import ApprovalDialog from '../Company/ApprovalDialog';
+import CompanyView from '../Company/CompanyView';
+import MessageFeedPanel from '../Company/MessageFeedPanel';
+import OnboardingOverlay from '../Onboarding/OnboardingOverlay';
 import { ErrorBoundary } from '../ErrorBoundary';
 import { useKeyboard } from '../../hooks/useKeyboard';
 import { useNotificationListener } from '../../hooks/useNotificationListener';
@@ -20,6 +21,21 @@ import { useResizeGuard } from '../../hooks/useResizeGuard';
 import type { SessionData, PaneLeaf, Pane, Surface } from '../../../shared/types';
 import { Terminal } from '@xterm/xterm';
 import { terminalRegistry } from '../../hooks/useTerminal';
+
+/** Map shell executable path to a human-readable display name. */
+function shellDisplayName(shellPath: string): string {
+  const base = shellPath.replace(/\\/g, '/').split('/').pop()?.toLowerCase() || '';
+  if (base.includes('pwsh')) return 'PowerShell 7';
+  if (base.includes('powershell')) return 'PowerShell';
+  if (base.includes('bash')) return 'Bash';
+  if (base.includes('wsl')) return 'WSL';
+  if (base.includes('cmd')) return 'CMD';
+  if (base.includes('zsh')) return 'Zsh';
+  if (base.includes('fish')) return 'Fish';
+  // Strip extension and capitalize
+  const name = base.replace(/\.exe$/i, '');
+  return name.charAt(0).toUpperCase() + name.slice(1);
+}
 
 /** Serialize an xterm Terminal buffer to plain text.
  *  Only includes lines up to the cursor position (skips empty viewport padding). */
@@ -110,6 +126,7 @@ function buildSessionData(dumped: Map<string, boolean>): SessionData {
     company: companySafe,
     memberCosts: state.memberCosts,
     sessionStartTime: state.sessionStartTime ?? undefined,
+    tokenDataByPty: Object.keys(state.tokenDataByPty).length > 0 ? state.tokenDataByPty : undefined,
     // User preferences
     theme: state.theme,
     locale: state.locale,
@@ -124,6 +141,7 @@ function buildSessionData(dumped: Map<string, boolean>): SessionData {
     customKeybindings: state.customKeybindings,
     autoUpdateEnabled: state.autoUpdateEnabled,
     customThemeColors: state.customThemeColors ?? undefined,
+    onboardingCompleted: state.onboardingCompleted,
   };
 }
 
@@ -143,6 +161,11 @@ export default function AppLayout() {
   const clearMultiview = useStore((s) => s.clearMultiview);
   const setActiveWorkspace = useStore((s) => s.setActiveWorkspace);
   const activeWorkspace = workspaces.find((w) => w.id === activeWorkspaceId);
+
+  const onboardingActive = useStore((s) => s.onboardingActive);
+  const onboardingCompleted = useStore((s) => s.onboardingCompleted);
+  const startOnboarding = useStore((s) => s.startOnboarding);
+  const completeOnboarding = useStore((s) => s.completeOnboarding);
 
   const [showAutoUpdatePrompt, setShowAutoUpdatePrompt] = useState(false);
   const t = useT();
@@ -283,6 +306,14 @@ export default function AppLayout() {
     });
   }, []);
 
+  // ─── First-run onboarding detection ─────────────────────────────────
+  useEffect(() => {
+    if (!sessionLoadedRef.current) return;
+    if (!onboardingCompleted && workspaces.length === 1) {
+      startOnboarding();
+    }
+  }, [onboardingCompleted, workspaces.length, startOnboarding]);
+
   // Re-reconcile when daemon connects late (race condition:
   // renderer may have already reconciled with empty pty list
   // before main process finished connecting to daemon).
@@ -319,40 +350,47 @@ export default function AppLayout() {
     return () => { clearInterval(interval); };
   }, []);
 
-  // Auto-create initial surface for empty leaf panes
+  // Auto-create initial surface for empty leaf panes (supports both single-leaf and preset branch roots)
   // 세션 복원된 경우: surfaces가 이미 있으므로 이 effect는 실행되지 않음
   // 브라우저 surface만 있는 pane: surfaceType이 'browser'이면 PTY 생성 스킵
   useEffect(() => {
     if (!activeWorkspace) return;
-    const root = activeWorkspace.rootPane;
-    if (root.type !== 'leaf') return;
 
-    // surfaces가 비어있을 때만 새 PTY 생성
-    if (root.surfaces.length === 0) {
-      let cancelled = false;
-      const paneId = root.id;
-      window.electronAPI.pty.create({ workspaceId: activeWorkspace.id }).then((result: { id: string; cwd?: string }) => {
+    // Collect all empty leaf panes from the tree
+    type LeafPane = import('../../../shared/types').PaneLeaf;
+    const collectEmptyLeaves = (pane: import('../../../shared/types').Pane): LeafPane[] => {
+      if (pane.type === 'leaf') {
+        return pane.surfaces.length === 0 ? [pane] : [];
+      }
+      return pane.children.flatMap(collectEmptyLeaves);
+    };
+
+    const emptyLeaves = collectEmptyLeaves(activeWorkspace.rootPane);
+    if (emptyLeaves.length === 0) return;
+
+    let cancelled = false;
+    const wsId = activeWorkspace.id;
+
+    for (const leaf of emptyLeaves) {
+      const paneId = leaf.id;
+      window.electronAPI.pty.create({ workspaceId: wsId }).then((result: { id: string; shell?: string; cwd?: string }) => {
         if (cancelled) {
           window.electronAPI.pty.dispose(result.id);
           return;
         }
-        addSurface(paneId, result.id, 'Terminal', result.cwd || '');
-        // Set initial CWD in workspace metadata so FileTree can use it immediately
-        if (result.cwd && activeWorkspace) {
-          useStore.getState().updateWorkspaceMetadata(activeWorkspace.id, { cwd: result.cwd });
+        const shellName = result.shell ? shellDisplayName(result.shell) : 'Terminal';
+        addSurface(paneId, result.id, shellName, result.cwd || '');
+        // Set initial CWD in workspace metadata from first pane
+        if (result.cwd) {
+          const currentMeta = useStore.getState().workspaces.find((w) => w.id === wsId)?.metadata;
+          if (!currentMeta?.cwd) {
+            useStore.getState().updateWorkspaceMetadata(wsId, { cwd: result.cwd });
+          }
         }
       });
-      return () => { cancelled = true; };
     }
 
-    // surfaces가 있지만 모두 browser 타입인 경우 PTY 생성 스킵
-    const hasTerminalSurface = root.surfaces.some(
-      (s) => !s.surfaceType || s.surfaceType === 'terminal'
-    );
-    if (!hasTerminalSurface) {
-      // 브라우저만 있는 pane — PTY 불필요, 아무것도 하지 않음
-      return;
-    }
+    return () => { cancelled = true; };
   }, [activeWorkspace?.id]);
 
   if (!activeWorkspace) return null;
@@ -456,6 +494,10 @@ export default function AppLayout() {
       <CommandPalette />
       <SettingsPanel />
       <ApprovalDialog />
+
+      {onboardingActive && (
+        <OnboardingOverlay onComplete={() => { completeOnboarding(); }} />
+      )}
 
       {/* First-run auto-update prompt */}
       {showAutoUpdatePrompt && (

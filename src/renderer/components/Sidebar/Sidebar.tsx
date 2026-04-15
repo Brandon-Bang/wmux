@@ -1,6 +1,7 @@
+import { useState, useCallback } from 'react';
 import { useStore } from '../../stores';
 import WorkspaceItem from './WorkspaceItem';
-import CompanyPanel from './CompanyPanel';
+import PresetPicker from './PresetPicker';
 import type { Pane, PaneLeaf, Surface } from '../../../shared/types';
 import { useT } from '../../hooks/useT';
 
@@ -39,6 +40,10 @@ export default function Sidebar() {
   const setSidebarMode = useStore((s) => s.setSidebarMode);
   const company = useStore((s) => s.company);
 
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const togglePicker = useCallback(() => setPickerOpen((v) => !v), []);
+  const closePicker = useCallback(() => setPickerOpen(false), []);
+
   const handleCtrlSelect = (wsId: string) => {
     toggleMultiviewWorkspace(wsId);
   };
@@ -48,21 +53,44 @@ export default function Sidebar() {
     if (!ws) return;
 
     const leaves = collectLeaves(ws.rootPane);
-    const surfaces: Surface[] = leaves.flatMap((l) => l.surfaces);
-
     const meta = ws.metadata;
-    const lines: string[] = [
-      `You are "${ws.name}" (${ws.id}).`,
-    ];
-    if (meta?.cwd) lines.push(`CWD: ${meta.cwd}`);
 
-    // Compact surface summary
-    const termSurfaces = surfaces.filter((s) => (s.surfaceType || 'terminal') === 'terminal');
-    const browserSurfaces = surfaces.filter((s) => s.surfaceType === 'browser');
-    const parts: string[] = [];
-    if (termSurfaces.length) parts.push(`${termSurfaces.length} terminal`);
-    if (browserSurfaces.length) parts.push(`${browserSurfaces.length} browser`);
-    if (parts.length) lines.push(`Surfaces: ${parts.join(', ')}`);
+    const lines: string[] = [
+      `# wmux Workspace: "${ws.name}"`,
+      `- Workspace ID: ${ws.id}`,
+      '',
+      '## Panes',
+    ];
+
+    let paneIndex = 1;
+    for (const leaf of leaves) {
+      const isActive = leaf.id === ws.activePaneId;
+      for (const s of leaf.surfaces) {
+        const surfaceType = s.surfaceType || 'terminal';
+        const activeTag = isActive ? '[ACTIVE] ' : '';
+
+        if (surfaceType === 'browser') {
+          lines.push(`${paneIndex}. ${activeTag}Browser`);
+          lines.push(`   - Surface ID: ${s.id}`);
+          if (s.browserUrl) lines.push(`   - URL: ${s.browserUrl}`);
+        } else {
+          lines.push(`${paneIndex}. ${activeTag}Terminal — ${s.shell || 'unknown'}`);
+          lines.push(`   - Surface ID: ${s.id}`);
+          lines.push(`   - PTY ID: ${s.ptyId}`);
+          const cwd = meta?.cwd || s.cwd;
+          if (cwd) lines.push(`   - CWD: ${cwd}`);
+          if (meta?.gitBranch) lines.push(`   - Git: ${meta.gitBranch}`);
+        }
+        lines.push('');
+        paneIndex++;
+      }
+    }
+
+    lines.push('## MCP Control');
+    lines.push('- Send command: terminal_send({ text: "..." })');
+    lines.push('- Target specific terminal: terminal_send({ text: "...", ptyId: "<pty-id>" })');
+    lines.push('- Navigate browser: browser_navigate({ url: "...", surfaceId: "<surface-id>" })');
+    lines.push('- List all surfaces: surface_list()');
 
     await window.clipboardAPI.writeText(lines.join('\n'));
 
@@ -86,19 +114,28 @@ export default function Sidebar() {
   return (
     <div className={`flex flex-col h-full bg-[var(--bg-mantle)] ${sidebarPosition === 'right' ? 'border-l' : 'border-r'} border-[var(--bg-surface)]`} style={{ width: 240 }}>
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--bg-surface)]">
+      <div className="relative flex items-center justify-between px-4 py-3 border-b border-[var(--bg-surface)]">
         <span className="text-sm font-bold text-[var(--text-main)] tracking-widest font-mono">WMUX</span>
         <div className="flex items-center gap-1.5">
-          {sidebarMode === 'workspaces' && (
-            <button
-              className="text-[var(--text-subtle)] hover:text-[var(--accent-green)] text-lg leading-none transition-colors"
-              onClick={() => addWorkspace()}
-              title={t('sidebar.newWorkspaceTooltip')}
-            >
-              +
-            </button>
-          )}
+          {/* File tree button hidden - feature unstable
+          <button
+            className={`text-sm leading-none transition-colors ${fileTreeVisible ? 'text-[var(--accent-blue)]' : 'text-[var(--text-subtle)] hover:text-[var(--accent-green)]'}`}
+            onClick={() => toggleFileTree()}
+            title={t('sidebar.fileTreeTooltip') || 'Toggle file tree'}
+          >
+            {'\u{1F4C1}'}
+          </button>
+          */}
+          <button
+            className="text-[var(--text-subtle)] hover:text-[var(--accent-green)] text-lg leading-none transition-colors"
+            onClick={togglePicker}
+            title={t('sidebar.newWorkspaceTooltip')}
+            data-onboarding-target="add-workspace"
+          >
+            +
+          </button>
         </div>
+        {pickerOpen && <PresetPicker onClose={closePicker} />}
       </div>
 
       {/* Tabs */}

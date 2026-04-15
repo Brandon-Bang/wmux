@@ -7,6 +7,7 @@ import { generateId } from '../../shared/types';
 import { handleCompanyRpc } from '../../company/renderer/rpcHandlers';
 import { formatA2aMessage, formatA2aBroadcast } from '../utils/a2aFormat';
 import type { A2aPriority } from '../utils/a2aFormat';
+import { terminalRegistry } from './useTerminal';
 
 // ---------------------------------------------------------------------------
 // Pane tree utilities
@@ -117,7 +118,18 @@ async function handleRpcMethod(method: string, params: RpcParams): Promise<RpcRe
   // -------------------------------------------------------------------------
 
   if (method === 'workspace.list') {
-    return store.workspaces.map((w) => ({ id: w.id, name: w.name }));
+    return store.workspaces.map((w) => ({
+      id: w.id,
+      name: w.name,
+      metadata: {
+        cwd: w.metadata?.cwd ?? null,
+        gitBranch: w.metadata?.gitBranch ?? null,
+        agentName: w.metadata?.agentName ?? null,
+        agentStatus: w.metadata?.agentStatus ?? null,
+        status: w.metadata?.status ?? null,
+        progress: w.metadata?.progress ?? null,
+      },
+    }));
   }
 
   if (method === 'workspace.new') {
@@ -151,10 +163,14 @@ async function handleRpcMethod(method: string, params: RpcParams): Promise<RpcRe
   // -------------------------------------------------------------------------
 
   if (method === 'surface.list') {
-    const ws = store.workspaces.find((w) => w.id === store.activeWorkspaceId);
+    const targetWsId = typeof params.workspaceId === 'string' ? params.workspaceId : store.activeWorkspaceId;
+    const ws = store.workspaces.find((w) => w.id === targetWsId);
     if (!ws) return [];
     // Search ALL leaf panes, not just active — so MCP can find browser surfaces anywhere
     const leaves = findLeafPanes(ws.rootPane);
+    // Use workspace metadata cwd/gitBranch as the live values (updated via shell integration)
+    const liveCwd = ws.metadata?.cwd;
+    const liveGitBranch = ws.metadata?.gitBranch;
     const surfaces = [];
     for (const leaf of leaves) {
       for (const s of leaf.surfaces) {
@@ -163,7 +179,8 @@ async function handleRpcMethod(method: string, params: RpcParams): Promise<RpcRe
           ptyId: s.ptyId,
           title: s.title,
           shell: s.shell,
-          cwd: s.cwd,
+          cwd: liveCwd || s.cwd,
+          gitBranch: liveGitBranch,
           surfaceType: s.surfaceType || 'terminal',
           browserUrl: s.browserUrl,
           paneId: leaf.id,
@@ -251,14 +268,23 @@ async function handleRpcMethod(method: string, params: RpcParams): Promise<RpcRe
   // -------------------------------------------------------------------------
 
   if (method === 'pane.list') {
-    const ws = store.workspaces.find((w) => w.id === store.activeWorkspaceId);
+    const targetWsId = typeof params.workspaceId === 'string' ? params.workspaceId : store.activeWorkspaceId;
+    const ws = store.workspaces.find((w) => w.id === targetWsId);
     if (!ws) return [];
+    const liveCwd = ws.metadata?.cwd;
+    const liveGitBranch = ws.metadata?.gitBranch;
     const leaves = findLeafPanes(ws.rootPane);
-    return leaves.map((l) => ({
-      id: l.id,
-      surfaceCount: l.surfaces.length,
-      active: l.id === ws.activePaneId,
-    }));
+    return leaves.map((l) => {
+      // Use the first terminal surface's cwd as the pane's cwd, prefer live metadata
+      const firstSurface = l.surfaces.find((s) => s.surfaceType !== 'browser');
+      return {
+        id: l.id,
+        surfaceCount: l.surfaces.length,
+        active: l.id === ws.activePaneId,
+        cwd: liveCwd || firstSurface?.cwd,
+        gitBranch: liveGitBranch,
+      };
+    });
   }
 
   if (method === 'pane.focus') {
@@ -281,9 +307,34 @@ async function handleRpcMethod(method: string, params: RpcParams): Promise<RpcRe
   // -------------------------------------------------------------------------
 
   if (method === 'input.readScreen') {
-    // xterm buffer access requires a ref wired in the terminal component.
-    // Deferred to a future implementation.
-    return { text: 'readScreen not yet implemented' };
+    let ptyId: string | null = typeof params.ptyId === 'string' ? params.ptyId : null;
+    if (!ptyId) {
+      const ws = store.workspaces.find((w) => w.id === store.activeWorkspaceId);
+      if (ws) {
+        const activePane = findPaneById(ws.rootPane, ws.activePaneId);
+        if (activePane && activePane.type === 'leaf') {
+          const surface = activePane.surfaces.find(
+            (s) => s.id === activePane.activeSurfaceId,
+          );
+          ptyId = surface?.ptyId ?? null;
+        }
+      }
+    }
+    if (!ptyId) return { ptyId: null, text: '' };
+
+    const terminal = terminalRegistry.get(ptyId);
+    if (!terminal) return { ptyId, text: '' };
+
+    const buffer = terminal.buffer.active;
+    const lastLine = buffer.baseY + buffer.cursorY;
+    const lines: string[] = [];
+    for (let i = 0; i <= lastLine && i < buffer.length; i++) {
+      const line = buffer.getLine(i);
+      if (line) lines.push(line.translateToString(true));
+    }
+    while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+
+    return { ptyId, text: lines.join('\n') };
   }
 
   if (method === 'input.getActivePtyId') {

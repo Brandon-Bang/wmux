@@ -463,6 +463,23 @@ function TabGeneral() {
         <UpdateStatus />
       </div>
 
+      {/* Tutorial */}
+      <div className="flex flex-col gap-2">
+        <SectionLabel label={t('settings.tutorial')} />
+        <SettingRow label={t('settings.restartTutorial')} description={t('settings.restartTutorialDesc')}>
+          <button
+            onClick={() => {
+              useStore.getState().startOnboarding();
+              useStore.getState().setSettingsPanelVisible(false);
+            }}
+            className="px-3 py-1.5 rounded-lg text-xs font-medium transition-colors shrink-0"
+            style={{ backgroundColor: 'var(--bg-surface)', color: 'var(--text-subtle)', border: '1px solid var(--bg-overlay)' }}
+          >
+            {t('settings.restartTutorial')}
+          </button>
+        </SettingRow>
+      </div>
+
       {/* Reset */}
       <ResetSection />
     </div>

@@ -5,6 +5,7 @@ process.on('uncaughtException', (err) => {
   console.error('[Main] Uncaught exception:', err);
 });
 
+import * as crypto from 'crypto';
 import { app, BrowserWindow, ipcMain, powerMonitor } from 'electron';
 import { createWindow } from './window/createWindow';
 import { PTYManager } from './pty/PTYManager';
@@ -39,7 +40,7 @@ if (process.env.WMUX_DISABLE_CDP !== 'true') {
   // Randomize port within range to prevent predictable scanning
   const basePort = 18800;
   const range = 100;
-  cdpPort = basePort + Math.floor(Math.random() * range);
+  cdpPort = basePort + crypto.randomInt(range);
   app.commandLine.appendSwitch('remote-debugging-port', cdpPort.toString());
   console.log(`[WinMux] CDP enabled on port ${cdpPort}`);
 }
@@ -218,7 +219,7 @@ function attachWindowRecovery(win: BrowserWindow): void {
 registerWorkspaceRpc(rpcRouter, () => mainWindow);
 registerSurfaceRpc(rpcRouter, () => mainWindow);
 registerPaneRpc(rpcRouter, () => mainWindow);
-registerInputRpc(rpcRouter, ptyManager, () => mainWindow);
+registerInputRpc(rpcRouter, ptyManager, () => mainWindow, () => daemonClient);
 registerNotifyRpc(rpcRouter, () => mainWindow);
 registerMetaRpc(rpcRouter, () => mainWindow);
 registerSystemRpc(rpcRouter);
@@ -366,6 +367,36 @@ app.on('before-quit', async (e) => {
 
   app.quit(); // re-trigger quit — isQuitting flag skips preventDefault
 });
+
+// Windows-specific: handle OS shutdown/logoff/restart.
+// Electron fires 'session-end' on WM_ENDSESSION, which is the last reliable
+// signal before Windows force-kills the process. The 'before-quit' async
+// handler may not complete in time, so we do a synchronous emergency save here.
+if (process.platform === 'win32') {
+  app.on('session-end' as any, () => {
+    console.log('[Main] session-end received — emergency sync save');
+    try {
+      // Import SessionManager lazily to avoid circular deps
+      const { SessionManager } = require('./session/SessionManager');
+      const sm = new SessionManager();
+      const existing = sm.load();
+      if (existing) {
+        sm.save(existing); // ensure last periodic save is flushed to disk
+      }
+    } catch (err) {
+      console.error('[Main] Emergency session save failed:', err);
+    }
+
+    // Detach daemon synchronously — don't kill sessions
+    if (daemonClient?.isConnected) {
+      try {
+        daemonClient.disconnectSync();
+      } catch {
+        // best effort — process is about to die
+      }
+    }
+  });
+}
 
 app.on('activate', () => {
   if (isQuitting) return;

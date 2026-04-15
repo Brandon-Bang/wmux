@@ -109,6 +109,13 @@ export interface UISlice {
   autoUpdateEnabled: boolean;
   setAutoUpdateEnabled: (enabled: boolean) => void;
 
+  // ─── Onboarding ─────────────────────────────────────────────────────
+  onboardingActive: boolean;
+  onboardingCompleted: boolean;
+  startOnboarding: () => void;
+  completeOnboarding: () => void;
+  skipOnboarding: () => void;
+
 }
 
 export const createUISlice: StateCreator<StoreState, [['zustand/immer', never]], [], UISlice> = (set, get) => ({
@@ -385,6 +392,24 @@ export const createUISlice: StateCreator<StoreState, [['zustand/immer', never]],
 
   setAutoUpdateEnabled: (enabled) => set((state) => {
     state.autoUpdateEnabled = enabled;
+  }),
+
+  // ─── Onboarding ─────────────────────────────────────────────────────
+  onboardingActive: false,
+  onboardingCompleted: false,
+
+  startOnboarding: () => set((state) => {
+    state.onboardingActive = true;
+  }),
+
+  completeOnboarding: () => set((state) => {
+    state.onboardingActive = false;
+    state.onboardingCompleted = true;
+  }),
+
+  skipOnboarding: () => set((state) => {
+    state.onboardingActive = false;
+    state.onboardingCompleted = true;
   }),
 
 });

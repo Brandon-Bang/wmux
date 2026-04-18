@@ -297,8 +297,8 @@ server.tool(
 );
 
 // 3. send_message — Primary tool for inter-workspace communication
-const sendMessageHandler = async ({ to, title, task_id, message, execute, data, data_mime_type }: {
-  to?: string; title?: string; task_id?: string; message: string; execute?: boolean;
+const sendMessageHandler = async ({ to, title, task_id, message, execute, silent, data, data_mime_type }: {
+  to?: string; title?: string; task_id?: string; message: string; execute?: boolean; silent?: boolean;
   data?: Record<string, unknown>; data_mime_type?: string;
 }) => {
   const wsId = await requireWorkspaceId();
@@ -310,6 +310,7 @@ const sendMessageHandler = async ({ to, title, task_id, message, execute, data, 
   if (to) params.to = to;
   if (title) params.title = title;
   if (execute) params.execute = true;
+  if (silent) params.silent = true;
   if (data) {
     params.data = data;
     params.dataMimeType = data_mime_type || 'application/json';
@@ -323,6 +324,7 @@ const sendMessageParams = {
   task_id: z.string().optional().describe('Reply to existing task ID'),
   message: z.string().describe('Message to send'),
   execute: z.boolean().optional().describe('Set true to run as background task (Claude executes the request). Default: false (just delivers the message)'),
+  silent: z.boolean().optional().describe('Skip the PTY paste delivery on the receiver. The task is still persisted and the receiver can poll via a2a_task_query — use this to avoid injecting content into a running TUI agent\'s prompt stream. Default: false.'),
   data: z.record(z.string(), z.unknown()).optional().describe('Optional structured data (JSON)'),
   data_mime_type: z.string().optional().describe('MIME type for data (default: application/json)'),
 };

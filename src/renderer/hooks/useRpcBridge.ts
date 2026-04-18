@@ -572,6 +572,13 @@ async function handleRpcMethod(method: string, params: RpcParams): Promise<RpcRe
       return { error: `a2a.task.send: ${e instanceof Error ? e.message : 'invalid'}` };
     }
 
+    // `silent: true` suppresses the PTY paste delivery so the receiver's
+    // terminal (and any running TUI agent) is not disturbed. The task is
+    // still persisted in the store and remains queryable via
+    // a2a_task_query — this is the canonical "inbox" path that avoids
+    // injecting message content into the receiver's prompt stream.
+    const silent = params.silent === true;
+
     // Build parts (A2A standard: kind discriminant)
     const parts: Part[] = [{ kind: 'text', text: message }];
     if (params.data && typeof params.data === 'object') {
@@ -594,15 +601,17 @@ async function handleRpcMethod(method: string, params: RpcParams): Promise<RpcRe
       const msg: Message = { kind: 'message', messageId: generateId('msg'), role, parts };
       store.addTaskMessage(taskId, msg);
 
-      // Deliver reply to the other party's terminal
-      const targetWsId = role === 'user' ? task.metadata.to.workspaceId : task.metadata.from.workspaceId;
-      const targetWs = store.workspaces.find((w) => w.id === targetWsId);
-      if (targetWs) {
-        const senderWs = store.workspaces.find((w) => w.id === workspaceId);
-        const senderName = senderWs?.name ?? 'unknown';
-        deliverPtyNotification(targetWs, senderName, message);
+      // Deliver reply to the other party's terminal (unless silent)
+      if (!silent) {
+        const targetWsId = role === 'user' ? task.metadata.to.workspaceId : task.metadata.from.workspaceId;
+        const targetWs = store.workspaces.find((w) => w.id === targetWsId);
+        if (targetWs) {
+          const senderWs = store.workspaces.find((w) => w.id === workspaceId);
+          const senderName = senderWs?.name ?? 'unknown';
+          deliverPtyNotification(targetWs, senderName, message);
+        }
       }
-      return { ok: true, taskId };
+      return { ok: true, taskId, silent };
     }
 
     // ── New task branch ──
@@ -646,10 +655,14 @@ async function handleRpcMethod(method: string, params: RpcParams): Promise<RpcRe
       artifacts: [],
     });
 
-    // Deliver message to target workspace's terminal
-    deliverPtyNotification(target, fromName, message);
+    // Deliver message to target workspace's terminal (unless silent).
+    // When silent, the task is only persisted in the store and the
+    // receiver must poll via a2a_task_query to discover it.
+    if (!silent) {
+      deliverPtyNotification(target, fromName, message);
+    }
 
-    return { ok: true, taskId: newTaskId };
+    return { ok: true, taskId: newTaskId, silent };
   }
 
   if (method === 'a2a.task.query') {

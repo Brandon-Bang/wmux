@@ -36,6 +36,8 @@ export const IPC = {
   AUTO_UPDATE_ENABLED: 'settings:auto-update-enabled',
   // Agent critical action approval
   APPROVAL_REQUEST: 'approval:request',
+  // Shell
+  SHELL_OPEN_EXTERNAL: 'shell:open-external',
   // File system
   FS_READ_DIR: 'fs:read-dir',
   FS_READ_FILE: 'fs:read-file',

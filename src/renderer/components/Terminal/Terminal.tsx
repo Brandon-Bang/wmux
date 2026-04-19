@@ -1,10 +1,14 @@
-import { useRef, useEffect, useState, useCallback } from 'react';
-import { useTerminal } from '../../hooks/useTerminal';
+import { useRef, useEffect, useState, useCallback, useMemo } from 'react';
+import { useTerminal, type ContextMenuEvent } from '../../hooks/useTerminal';
 import { useStore } from '../../stores';
 import { useIpc } from '../../hooks/useIpc';
 import ViCopyMode from './ViCopyMode';
 import SearchBar from './SearchBar';
+import BookmarkIndicator from './BookmarkIndicator';
+import ContextMenu from './ContextMenu';
 import '@xterm/xterm/css/xterm.css';
+
+const EMPTY_BOOKMARKS: number[] = [];
 
 interface TerminalProps {
   ptyId?: string;
@@ -32,11 +36,14 @@ export default function TerminalComponent({ ptyId: externalPtyId, shell, cwd, on
   const setViCopyModeActive = useStore((s) => s.setViCopyModeActive);
   const searchBarVisible = useStore((s) => s.searchBarVisible);
   const setSearchBarVisible = useStore((s) => s.setSearchBarVisible);
+  const bookmarks = useStore((s) => (ptyId ? s.terminalBookmarks[ptyId] : undefined)) ?? EMPTY_BOOKMARKS;
   const { invoke: ipcInvoke } = useIpc();
   // Keep the invoker stable across re-renders without re-triggering the PTY
   // creation effect below.
   const ipcInvokeRef = useRef(ipcInvoke);
   ipcInvokeRef.current = ipcInvoke;
+
+  const [ctxMenu, setCtxMenu] = useState<ContextMenuEvent | null>(null);
 
   // Hide restoring overlay when first data arrives
   const handleFirstData = useCallback(() => setRestoring(false), []);
@@ -113,8 +120,12 @@ export default function TerminalComponent({ ptyId: externalPtyId, shell, cwd, on
 
   // isVisible = workspace is shown AND this surface tab is the active one.
   // useTerminal uses this to skip fit() when the container is display:none.
+  const handleContextMenu = useCallback((e: ContextMenuEvent) => {
+    setCtxMenu(e);
+  }, []);
+
   const isVisible = isWorkspaceVisible && isActive;
-  const { terminal: terminalRef, findNext, findPrevious, clearSearch } = useTerminal(containerRef, { ptyId, isVisible, scrollbackFile, onFirstData: scrollbackFile ? handleFirstData : undefined });
+  const { terminal: terminalRef, findNext, findPrevious, clearSearch } = useTerminal(containerRef, { ptyId, isVisible, scrollbackFile, onFirstData: scrollbackFile ? handleFirstData : undefined, onContextMenu: handleContextMenu });
 
   const showViCopyMode = viCopyModeActive && isActive && terminalRef.current !== null;
   const showSearchBar = searchBarVisible && isActive;
@@ -123,6 +134,37 @@ export default function TerminalComponent({ ptyId: externalPtyId, shell, cwd, on
     clearSearch();
     setSearchBarVisible(false);
   };
+
+  const handleCopy = useCallback(() => {
+    if (ctxMenu?.selectedText) {
+      void window.clipboardAPI.writeText(ctxMenu.selectedText);
+      terminalRef.current?.clearSelection();
+    }
+  }, [ctxMenu, terminalRef]);
+
+  const handlePaste = useCallback(() => {
+    if (!ptyId) return;
+    void (async () => {
+      const text = await window.clipboardAPI.readText();
+      if (text) {
+        const terminal = terminalRef.current;
+        const modes = (terminal as unknown as { modes?: { bracketedPasteMode?: boolean } })?.modes;
+        if (modes?.bracketedPasteMode) {
+          window.electronAPI.pty.write(ptyId, `\x1b[200~${text}\x1b[201~`);
+        } else {
+          window.electronAPI.pty.write(ptyId, text);
+        }
+      }
+    })();
+  }, [ptyId, terminalRef]);
+
+  const handleOpenLink = useCallback((url: string) => {
+    window.electronAPI.shell.openExternal(url);
+  }, []);
+
+  const handleCopyLink = useCallback((url: string) => {
+    void window.clipboardAPI.writeText(url);
+  }, []);
 
   return (
     <div
@@ -147,12 +189,35 @@ export default function TerminalComponent({ ptyId: externalPtyId, shell, cwd, on
         style={{ width: '100%', height: '100%', padding: '4px' }}
       />
 
+      {/* Scrollback bookmark markers on the left edge */}
+      <BookmarkIndicator
+        terminal={terminalRef.current}
+        bookmarks={bookmarks}
+        containerRef={containerRef}
+      />
+
       {/* Search bar overlay */}
       {showSearchBar && (
         <SearchBar
           onFindNext={findNext}
           onFindPrevious={findPrevious}
           onClose={handleCloseSearch}
+        />
+      )}
+
+      {/* Context menu */}
+      {ctxMenu && (
+        <ContextMenu
+          x={ctxMenu.x}
+          y={ctxMenu.y}
+          hasSelection={ctxMenu.hasSelection}
+          selectedText={ctxMenu.selectedText}
+          linkUrl={ctxMenu.linkUrl}
+          onCopy={handleCopy}
+          onPaste={handlePaste}
+          onOpenLink={handleOpenLink}
+          onCopyLink={handleCopyLink}
+          onClose={() => setCtxMenu(null)}
         />
       )}
 

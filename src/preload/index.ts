@@ -28,6 +28,7 @@ const electronAPI = {
   },
   shell: {
     list: () => ipcRenderer.invoke(IPC.SHELL_LIST) as Promise<{ name: string; path: string; args?: string[] }[]>,
+    openExternal: (url: string) => ipcRenderer.invoke(IPC.SHELL_OPEN_EXTERNAL, url) as Promise<void>,
   },
   session: {
     save: (data: unknown) => ipcRenderer.invoke(IPC.SESSION_SAVE, data),

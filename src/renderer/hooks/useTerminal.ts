@@ -3,6 +3,8 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
 import { SearchAddon } from '@xterm/addon-search';
+import { Unicode11Addon } from '@xterm/addon-unicode11';
+import { WebLinksAddon } from '@xterm/addon-web-links';
 import { useStore } from '../stores';
 import { t } from '../i18n';
 import { XTERM_THEMES, extractXtermColors, type ThemeId, type BuiltinThemeId } from '../themes';
@@ -27,6 +29,14 @@ function showCopyToast() {
   copyToastTimer = setTimeout(() => { el!.style.opacity = '0'; }, 1200);
 }
 
+export interface ContextMenuEvent {
+  x: number;
+  y: number;
+  hasSelection: boolean;
+  selectedText: string;
+  linkUrl: string | null;
+}
+
 interface UseTerminalOptions {
   ptyId: string | null;
   /** Combined visibility flag: true only when the terminal's workspace AND surface tab are both active.
@@ -36,6 +46,8 @@ interface UseTerminalOptions {
   scrollbackFile?: string;
   /** Called once when the first chunk of PTY data is received (useful for hiding restore overlays) */
   onFirstData?: () => void;
+  /** Called on right-click to show context menu */
+  onContextMenu?: (e: ContextMenuEvent) => void;
 }
 
 export function useTerminal(containerRef: React.RefObject<HTMLDivElement | null>, options: UseTerminalOptions) {
@@ -47,11 +59,13 @@ export function useTerminal(containerRef: React.RefObject<HTMLDivElement | null>
   const webglAddonRef = useRef<WebglAddon | null>(null);
   // loadWebgl closure ref — set by the main effect, called by visibility effect.
   const loadWebglRef = useRef<(() => void) | null>(null);
-  const { ptyId, isVisible = true, scrollbackFile, onFirstData } = options;
+  const { ptyId, isVisible = true, scrollbackFile, onFirstData, onContextMenu } = options;
   const ptyIdRef = useRef(ptyId);
   ptyIdRef.current = ptyId;
   const onFirstDataRef = useRef(onFirstData);
   onFirstDataRef.current = onFirstData;
+  const onContextMenuRef = useRef(onContextMenu);
+  onContextMenuRef.current = onContextMenu;
   const terminalFontSize = useStore((s) => s.terminalFontSize);
   const terminalFontFamily = useStore((s) => s.terminalFontFamily);
   const scrollbackLines = useStore((s) => s.scrollbackLines);
@@ -99,8 +113,18 @@ export function useTerminal(containerRef: React.RefObject<HTMLDivElement | null>
 
     const fitAddon = new FitAddon();
     const searchAddon = new SearchAddon();
+    const unicode11Addon = new Unicode11Addon();
+    const webLinksAddon = new WebLinksAddon((_event, uri) => {
+      window.electronAPI.shell.openExternal(uri);
+    });
     terminal.loadAddon(fitAddon);
     terminal.loadAddon(searchAddon);
+    terminal.loadAddon(unicode11Addon);
+    terminal.loadAddon(webLinksAddon);
+    // Activate Unicode 11 width tables — required for correct CJK / emoji
+    // width. Without this, xterm defaults to v6 and TUI apps that use cursor
+    // positioning (Claude Code, vim, etc.) collide frames over Korean text.
+    terminal.unicode.activeVersion = '11';
     terminal.open(container);
 
     // WebGL addon loading — only called for visible terminals.
@@ -174,8 +198,12 @@ export function useTerminal(containerRef: React.RefObject<HTMLDivElement | null>
       }
 
       // Pass app shortcuts through to useKeyboard (don't let xterm consume them)
-      if (e.ctrlKey && !e.shiftKey && [',', 'b', 'k', 'i', 'n', 't'].includes(e.key)) {
+      if (e.ctrlKey && !e.shiftKey && [',', 'b', 'k', 'i', 'n', 't', 'm', 'ArrowUp', 'ArrowDown', '`'].includes(e.key)) {
         return false; // let DOM bubble to useKeyboard
+      }
+      // Ctrl+` by code (cross-layout)
+      if (e.ctrlKey && !e.shiftKey && e.code === 'Backquote') {
+        return false;
       }
       if (e.ctrlKey && e.shiftKey) {
         return false; // all Ctrl+Shift combos → app shortcuts
@@ -278,12 +306,30 @@ export function useTerminal(containerRef: React.RefObject<HTMLDivElement | null>
       return true;
     });
 
-    // Right-click: always paste
+    // Right-click: show context menu or fallback to paste
     terminal.element?.addEventListener('contextmenu', (e) => {
       e.preventDefault();
+      const sel = terminal.getSelection();
+      // Detect if right-click target is a link
+      let linkUrl: string | null = null;
+      const target = e.target as HTMLElement | null;
+      if (target) {
+        const anchor = target.closest('a[href]') as HTMLAnchorElement | null;
+        if (anchor) linkUrl = anchor.href;
+      }
+      if (onContextMenuRef.current) {
+        onContextMenuRef.current({
+          x: e.clientX,
+          y: e.clientY,
+          hasSelection: !!sel,
+          selectedText: sel || '',
+          linkUrl,
+        });
+        return;
+      }
+      // Fallback: paste (original behavior when no context menu handler)
       void (async () => {
         const text = await window.clipboardAPI.readText();
-        console.log('[wmux:clipboard] right-click paste len=', text?.length ?? 0);
         if (text) {
           const modes = (terminal as unknown as { modes?: { bracketedPasteMode?: boolean } }).modes;
           if (modes?.bracketedPasteMode) {
@@ -291,23 +337,33 @@ export function useTerminal(containerRef: React.RefObject<HTMLDivElement | null>
           } else {
             window.electronAPI.pty.write(ptyId, text);
           }
-          return;
-        }
-        if (window.clipboardAPI.readImage) {
-          const imagePath = await window.clipboardAPI.readImage();
-          if (imagePath) {
-            const quoted = imagePath.includes(' ') ? `"${imagePath}"` : imagePath;
-            window.electronAPI.pty.write(ptyId, quoted);
-          }
         }
       })().catch((err) => console.error('[wmux:clipboard] right-click error:', err));
     });
 
     // Drag-and-drop is handled globally in preload via webUtils.getPathForFile()
 
-    // Forward user input to PTY
+    // Forward user input to PTY and track commands for palette history
+    let inputBuffer = '';
     terminal.onData((data) => {
       window.electronAPI.pty.write(ptyId, data);
+
+      if (data === '\r' || data === '\n') {
+        const cmd = inputBuffer.trim();
+        if (cmd.length > 1) {
+          useStore.getState().addRecentCommand(cmd);
+        }
+        inputBuffer = '';
+      } else if (data === '\x7f' || data === '\b') {
+        // Backspace
+        inputBuffer = inputBuffer.slice(0, -1);
+      } else if (data.length === 1 && data.charCodeAt(0) >= 32) {
+        // Printable character
+        inputBuffer += data;
+      } else if (data.length > 1 && !data.startsWith('\x1b')) {
+        // Pasted text (not escape sequence)
+        inputBuffer += data;
+      }
     });
 
     // Deferred PTY listener references — connected after scrollback restore
@@ -506,17 +562,29 @@ export function useTerminal(containerRef: React.RefObject<HTMLDivElement | null>
     };
   }, []);
 
-  const findNext = useCallback((text: string) => {
-    searchAddonRef.current?.findNext(text, { decorations: getSearchDecorations() });
+  const findNext = useCallback((text: string, useRegex = false) => {
+    searchAddonRef.current?.findNext(text, { decorations: getSearchDecorations(), regex: useRegex });
   }, [getSearchDecorations]);
 
-  const findPrevious = useCallback((text: string) => {
-    searchAddonRef.current?.findPrevious(text, { decorations: getSearchDecorations() });
+  const findPrevious = useCallback((text: string, useRegex = false) => {
+    searchAddonRef.current?.findPrevious(text, { decorations: getSearchDecorations(), regex: useRegex });
   }, [getSearchDecorations]);
 
   const clearSearch = useCallback(() => {
     searchAddonRef.current?.clearDecorations();
   }, []);
 
-  return { terminal: terminalRef, fit, searchAddonRef, findNext, findPrevious, clearSearch };
+  /** Returns the current absolute scroll position: baseY + viewportY */
+  const getScrollPosition = useCallback((): number => {
+    const term = terminalRef.current;
+    if (!term) return 0;
+    return term.buffer.active.baseY + term.buffer.active.viewportY;
+  }, []);
+
+  /** Scrolls the terminal to the given absolute line number */
+  const scrollToLine = useCallback((line: number) => {
+    terminalRef.current?.scrollToLine(line);
+  }, []);
+
+  return { terminal: terminalRef, fit, searchAddonRef, findNext, findPrevious, clearSearch, getScrollPosition, scrollToLine };
 }

@@ -1,6 +1,24 @@
 import { useEffect, useRef } from 'react';
 import { useStore } from '../stores';
 import { findLeaf } from '../../shared/paneUtils';
+import { terminalRegistry } from './useTerminal';
+import { t } from '../i18n';
+
+// Lightweight bookmark toast — reuses the same DOM element pattern as showCopyToast
+let bookmarkToastTimer: ReturnType<typeof setTimeout> | null = null;
+function showBookmarkToast() {
+  let el = document.getElementById('wmux-bookmark-toast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'wmux-bookmark-toast';
+    el.style.cssText = 'position:fixed;bottom:28px;left:50%;transform:translateX(-50%);background:var(--accent-yellow);color:var(--bg-base);font-family:monospace;font-size:11px;font-weight:600;padding:3px 12px;border-radius:4px;z-index:9999;pointer-events:none;opacity:0;transition:opacity 0.2s';
+    document.body.appendChild(el);
+  }
+  el.textContent = t('terminal.bookmarkAdded');
+  el.style.opacity = '1';
+  if (bookmarkToastTimer) clearTimeout(bookmarkToastTimer);
+  bookmarkToastTimer = setTimeout(() => { el!.style.opacity = '0'; }, 1200);
+}
 
 /**
  * Convert a KeyboardEvent into a normalized key combo string.
@@ -39,19 +57,19 @@ export function useKeyboard() {
   const prefixTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    // Prefix mode command map — real implementations
-    const prefixCommands: Record<string, () => void> = {
-      '%': () => {
+    // Action registry — maps action IDs to implementations
+    const prefixActions: Record<string, () => void> = {
+      splitHorizontal: () => {
         const state = store.getState();
         const ws = state.workspaces.find((w) => w.id === state.activeWorkspaceId);
         if (ws) state.splitPane(ws.activePaneId, 'horizontal');
       },
-      '"': () => {
+      splitVertical: () => {
         const state = store.getState();
         const ws = state.workspaces.find((w) => w.id === state.activeWorkspaceId);
         if (ws) state.splitPane(ws.activePaneId, 'vertical');
       },
-      'x': () => {
+      closePane: () => {
         const state = store.getState();
         const ws = state.workspaces.find((w) => w.id === state.activeWorkspaceId);
         if (!ws) return;
@@ -59,32 +77,32 @@ export function useKeyboard() {
         if (activeLeaf) disposePanePtys(activeLeaf);
         state.closePane(ws.activePaneId);
       },
-      'c': () => { store.getState().addWorkspace(); },
-      'n': () => {
+      newWorkspace: () => { store.getState().addWorkspace(); },
+      nextWorkspace: () => {
         const { workspaces, activeWorkspaceId } = store.getState();
         if (workspaces.length <= 1) return;
         const currentIdx = workspaces.findIndex((w) => w.id === activeWorkspaceId);
         const nextIdx = (currentIdx + 1) % workspaces.length;
         store.getState().setActiveWorkspace(workspaces[nextIdx].id);
       },
-      'p': () => {
+      prevWorkspace: () => {
         const { workspaces, activeWorkspaceId } = store.getState();
         if (workspaces.length <= 1) return;
         const currentIdx = workspaces.findIndex((w) => w.id === activeWorkspaceId);
         const prevIdx = (currentIdx - 1 + workspaces.length) % workspaces.length;
         store.getState().setActiveWorkspace(workspaces[prevIdx].id);
       },
-      'd': () => { window.electronAPI.window.hide(); },
-      'z': () => {
+      hideWindow: () => { window.electronAPI.window.hide(); },
+      toggleZoom: () => {
         const state = store.getState();
         const ws = state.workspaces.find((w) => w.id === state.activeWorkspaceId);
         if (ws) state.togglePaneZoom(ws.activePaneId);
       },
-      ':': () => { store.getState().toggleCommandPalette(); },
-      'ArrowUp': () => { store.getState().focusPaneDirection('up'); },
-      'ArrowDown': () => { store.getState().focusPaneDirection('down'); },
-      'ArrowLeft': () => { store.getState().focusPaneDirection('left'); },
-      'ArrowRight': () => { store.getState().focusPaneDirection('right'); },
+      commandPalette: () => { store.getState().toggleCommandPalette(); },
+      focusUp: () => { store.getState().focusPaneDirection('up'); },
+      focusDown: () => { store.getState().focusPaneDirection('down'); },
+      focusLeft: () => { store.getState().focusPaneDirection('left'); },
+      focusRight: () => { store.getState().focusPaneDirection('right'); },
     };
     /** Clear the prefix timeout if running */
     const clearPrefixTimeout = () => {
@@ -127,10 +145,12 @@ export function useKeyboard() {
           return;
         }
 
-        // Check if this is a known prefix command
-        const cmd = prefixCommands[key];
-        if (cmd) {
-          cmd();
+        // Look up action from store's prefix bindings
+        const { prefixConfig } = store.getState();
+        const actionId = prefixConfig.bindings[key];
+        const action = actionId ? prefixActions[actionId] : undefined;
+        if (action) {
+          action();
           exitPrefixMode();
           return;
         }
@@ -154,9 +174,10 @@ export function useKeyboard() {
       const isFunctionKey = key.length > 1 && /^F\d{1,2}$/.test(key);
       if (isEditable && !ctrl && !alt && !isFunctionKey) return;
 
-      // Ctrl+B (without shift): Enter prefix mode
+      // Ctrl+<prefixKey>: Enter prefix mode (configurable, default Ctrl+B)
       // Use e.code for Korean IME compatibility (see commit 60e39b0)
-      if (ctrl && !shift && !alt && code === 'KeyB') {
+      const prefixKeyCode = store.getState().prefixConfig.key;
+      if (ctrl && !shift && !alt && code === prefixKeyCode) {
         e.preventDefault();
         store.getState().setPrefixMode(true);
         // Start timeout — auto-exit prefix mode after 2s
@@ -378,6 +399,13 @@ export function useKeyboard() {
         return;
       }
 
+      // Ctrl+`: Toggle floating terminal pane
+      if (ctrl && !shift && !alt && e.code === 'Backquote') {
+        e.preventDefault();
+        store.getState().toggleFloatingPane();
+        return;
+      }
+
       // Ctrl+Shift+H: Flash active pane to highlight its position
       if (ctrl && shift && !alt && key === 'H') {
         e.preventDefault();
@@ -396,6 +424,80 @@ export function useKeyboard() {
       if (ctrl && shift && !alt && key === 'G') {
         e.preventDefault();
         store.getState().clearMultiview();
+        return;
+      }
+
+      // Ctrl+M: Add scrollback bookmark at current scroll position
+      if (ctrl && !shift && !alt && key === 'm') {
+        e.preventDefault();
+        const state = store.getState();
+        const ws = state.workspaces.find((w) => w.id === state.activeWorkspaceId);
+        if (ws) {
+          const pane = findLeaf(ws.rootPane, ws.activePaneId);
+          if (pane) {
+            const surface = pane.surfaces.find((s) => s.id === pane.activeSurfaceId);
+            if (surface?.ptyId) {
+              const term = terminalRegistry.get(surface.ptyId);
+              if (term) {
+                const line = term.buffer.active.baseY + term.buffer.active.viewportY;
+                state.addBookmark(surface.ptyId, line);
+                showBookmarkToast();
+              }
+            }
+          }
+        }
+        return;
+      }
+
+      // Ctrl+ArrowUp: Jump to previous bookmark (above current position)
+      if (ctrl && !shift && !alt && key === 'ArrowUp') {
+        e.preventDefault();
+        const state = store.getState();
+        const ws = state.workspaces.find((w) => w.id === state.activeWorkspaceId);
+        if (ws) {
+          const pane = findLeaf(ws.rootPane, ws.activePaneId);
+          if (pane) {
+            const surface = pane.surfaces.find((s) => s.id === pane.activeSurfaceId);
+            if (surface?.ptyId) {
+              const term = terminalRegistry.get(surface.ptyId);
+              const bookmarks = state.terminalBookmarks[surface.ptyId];
+              if (term && bookmarks && bookmarks.length > 0) {
+                const currentLine = term.buffer.active.baseY + term.buffer.active.viewportY;
+                // Find nearest bookmark strictly above current position
+                const above = bookmarks.filter((l) => l < currentLine);
+                if (above.length > 0) {
+                  term.scrollToLine(above[above.length - 1]);
+                }
+              }
+            }
+          }
+        }
+        return;
+      }
+
+      // Ctrl+ArrowDown: Jump to next bookmark (below current position)
+      if (ctrl && !shift && !alt && key === 'ArrowDown') {
+        e.preventDefault();
+        const state = store.getState();
+        const ws = state.workspaces.find((w) => w.id === state.activeWorkspaceId);
+        if (ws) {
+          const pane = findLeaf(ws.rootPane, ws.activePaneId);
+          if (pane) {
+            const surface = pane.surfaces.find((s) => s.id === pane.activeSurfaceId);
+            if (surface?.ptyId) {
+              const term = terminalRegistry.get(surface.ptyId);
+              const bookmarks = state.terminalBookmarks[surface.ptyId];
+              if (term && bookmarks && bookmarks.length > 0) {
+                const currentLine = term.buffer.active.baseY + term.buffer.active.viewportY;
+                // Find nearest bookmark strictly below current position
+                const below = bookmarks.filter((l) => l > currentLine);
+                if (below.length > 0) {
+                  term.scrollToLine(below[0]);
+                }
+              }
+            }
+          }
+        }
         return;
       }
 

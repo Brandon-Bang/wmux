@@ -1,5 +1,6 @@
-import { Fragment } from 'react';
-import { Panel, Group, Separator } from 'react-resizable-panels';
+import { Fragment, useCallback, useEffect, useRef } from 'react';
+import { Panel, Group, Separator, useGroupRef } from 'react-resizable-panels';
+import type { Layout } from 'react-resizable-panels';
 import type { Pane as PaneType } from '../../../shared/types';
 import { useStore } from '../../stores';
 import PaneComponent from './Pane';
@@ -15,14 +16,73 @@ export default function PaneContainer({ pane, isWorkspaceVisible = true }: PaneC
     return ws?.activePaneId || '';
   });
 
+  const updatePaneSizes = useStore((s) => s.updatePaneSizes);
+
+  // useGroupRef is the v4 way to get an imperative handle for setLayout/getLayout
+  const groupRef = useGroupRef();
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const programmaticRef = useRef(false);
+
+  const paneSizes = pane.type === 'branch' ? pane.sizes : undefined;
+  const paneChildren = pane.type === 'branch' ? pane.children : undefined;
+  useEffect(() => {
+    if (!paneSizes || !paneChildren || !groupRef.current) return;
+
+    const layout: Layout = {};
+    paneChildren.forEach((child, i) => {
+      layout[child.id] = paneSizes[i] ?? 100 / paneChildren.length;
+    });
+
+    const current = groupRef.current.getLayout();
+    const isDifferent = paneChildren.some((child) => {
+      const stored = layout[child.id];
+      const visual = current[child.id];
+      return visual === undefined || Math.abs(stored - visual) > 0.5;
+    });
+
+    if (isDifferent) {
+      programmaticRef.current = true;
+      groupRef.current.setLayout(layout);
+    }
+  }, [paneSizes]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleLayoutChanged = useCallback(
+    (layout: Layout) => {
+      if (programmaticRef.current) {
+        programmaticRef.current = false;
+        return;
+      }
+      if (!paneChildren) return;
+      const sizes = paneChildren.map((child) => layout[child.id] ?? 100 / paneChildren.length);
+
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+      debounceRef.current = setTimeout(() => {
+        updatePaneSizes(pane.id, sizes);
+      }, 200);
+    },
+    [pane.id, paneChildren, updatePaneSizes],
+  );
+
   if (pane.type === 'leaf') {
-    return <PaneComponent pane={pane} isActive={pane.id === activePaneId} isWorkspaceVisible={isWorkspaceVisible} />;
+    return (
+      <PaneComponent
+        pane={pane}
+        isActive={pane.id === activePaneId}
+        isWorkspaceVisible={isWorkspaceVisible}
+      />
+    );
   }
 
   const orientation = pane.direction === 'horizontal' ? 'horizontal' : 'vertical';
 
   return (
-    <Group orientation={orientation} className="h-full w-full" resizeTargetMinimumSize={{ coarse: 37, fine: 16 }}>
+    <Group
+      groupRef={groupRef}
+      orientation={orientation}
+      className="h-full w-full"
+      resizeTargetMinimumSize={{ coarse: 37, fine: 16 }}
+      onLayoutChanged={handleLayoutChanged}
+    >
       {pane.children.map((child, i) => (
         <Fragment key={child.id}>
           {i > 0 && (
@@ -32,7 +92,11 @@ export default function PaneContainer({ pane, isWorkspaceVisible = true }: PaneC
               } bg-[var(--bg-surface)] hover:bg-[var(--accent-blue)] transition-colors`}
             />
           )}
-          <Panel defaultSize={pane.sizes?.[i] ?? 100 / pane.children.length} minSize={10}>
+          <Panel
+            id={child.id}
+            defaultSize={pane.sizes?.[i] ?? 100 / pane.children.length}
+            minSize={10}
+          >
             <PaneContainer pane={child} isWorkspaceVisible={isWorkspaceVisible} />
           </Panel>
         </Fragment>

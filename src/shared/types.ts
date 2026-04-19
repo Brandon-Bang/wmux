@@ -107,6 +107,66 @@ export type AgentStatus = 'running' | 'complete' | 'error' | 'waiting' | 'idle';
 // === Status indicator colors ===
 export type WorkspaceStatus = 'active' | 'idle' | 'error' | 'running';
 
+// === Layout Templates ===
+export interface LayoutNodeLeaf {
+  type: 'leaf';
+}
+
+export interface LayoutNodeBranch {
+  type: 'branch';
+  direction: 'horizontal' | 'vertical';
+  sizes: number[];
+  children: LayoutNode[];
+}
+
+export type LayoutNode = LayoutNodeLeaf | LayoutNodeBranch;
+
+export interface LayoutTemplate {
+  id: string;
+  name: string;
+  builtin?: boolean;
+  tree: LayoutNode;
+}
+
+export const BUILTIN_TEMPLATES: LayoutTemplate[] = [
+  {
+    id: 'builtin-2col',
+    name: '2 Columns',
+    builtin: true,
+    tree: { type: 'branch', direction: 'horizontal', sizes: [50, 50], children: [{ type: 'leaf' }, { type: 'leaf' }] },
+  },
+  {
+    id: 'builtin-2row',
+    name: '2 Rows',
+    builtin: true,
+    tree: { type: 'branch', direction: 'vertical', sizes: [50, 50], children: [{ type: 'leaf' }, { type: 'leaf' }] },
+  },
+  {
+    id: 'builtin-3col',
+    name: '3 Columns',
+    builtin: true,
+    tree: { type: 'branch', direction: 'horizontal', sizes: [33, 34, 33], children: [{ type: 'leaf' }, { type: 'leaf' }, { type: 'leaf' }] },
+  },
+  {
+    id: 'builtin-main-side',
+    name: 'Main + Side',
+    builtin: true,
+    tree: { type: 'branch', direction: 'horizontal', sizes: [70, 30], children: [{ type: 'leaf' }, { type: 'leaf' }] },
+  },
+  {
+    id: 'builtin-grid',
+    name: '2x2 Grid',
+    builtin: true,
+    tree: {
+      type: 'branch', direction: 'vertical', sizes: [50, 50],
+      children: [
+        { type: 'branch', direction: 'horizontal', sizes: [50, 50], children: [{ type: 'leaf' }, { type: 'leaf' }] },
+        { type: 'branch', direction: 'horizontal', sizes: [50, 50], children: [{ type: 'leaf' }, { type: 'leaf' }] },
+      ],
+    },
+  },
+];
+
 // === Custom keybinding ===
 export interface CustomKeybinding {
   id: string;
@@ -115,6 +175,31 @@ export interface CustomKeybinding {
   command: string;    // text to send to terminal
   sendEnter: boolean; // append \n after command
 }
+
+// === Prefix mode bindings ===
+export interface PrefixConfig {
+  key: string;  // e.code value for the prefix trigger, e.g. 'KeyB'
+  bindings: Record<string, string>;  // key → action id
+}
+
+export const DEFAULT_PREFIX_CONFIG: PrefixConfig = {
+  key: 'KeyB',
+  bindings: {
+    '%': 'splitHorizontal',
+    '"': 'splitVertical',
+    'x': 'closePane',
+    'c': 'newWorkspace',
+    'n': 'nextWorkspace',
+    'p': 'prevWorkspace',
+    'd': 'hideWindow',
+    'z': 'toggleZoom',
+    ':': 'commandPalette',
+    'ArrowUp': 'focusUp',
+    'ArrowDown': 'focusDown',
+    'ArrowLeft': 'focusLeft',
+    'ArrowRight': 'focusRight',
+  },
+};
 
 // === Session: serialized app state ===
 export interface SessionData {
@@ -141,6 +226,10 @@ export interface SessionData {
   sessionStartTime?: number;
   tokenDataByPty?: Record<string, { totalTokens: number; inputTokens: number; outputTokens: number; totalCost: number; lastUpdate: number }>;
   onboardingCompleted?: boolean;
+  floatingPanePtyId?: string | null;
+  layoutTemplates?: LayoutTemplate[];
+  recentCommands?: string[];
+  prefixConfig?: PrefixConfig;
 }
 
 // === Custom Theme Colors ===

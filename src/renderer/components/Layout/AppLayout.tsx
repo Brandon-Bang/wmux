@@ -14,6 +14,7 @@ import CompanyView from '../Company/CompanyView';
 import MessageFeedPanel from '../Company/MessageFeedPanel';
 import OnboardingOverlay from '../Onboarding/OnboardingOverlay';
 import ToastContainer from '../Toast/ToastContainer';
+import FloatingPane from '../Terminal/FloatingPane';
 import { ErrorBoundary } from '../ErrorBoundary';
 import { useKeyboard } from '../../hooks/useKeyboard';
 import { useNotificationListener } from '../../hooks/useNotificationListener';
@@ -144,6 +145,8 @@ function buildSessionData(dumped: Map<string, boolean>): SessionData {
     autoUpdateEnabled: state.autoUpdateEnabled,
     customThemeColors: state.customThemeColors ?? undefined,
     onboardingCompleted: state.onboardingCompleted,
+    floatingPanePtyId: state.floatingPanePtyId ?? undefined,
+    prefixConfig: state.prefixConfig,
   };
 }
 
@@ -589,6 +592,7 @@ export default function AppLayout() {
           }}
         />
       )}
+      <FloatingPane />
       <ToastContainer />
     </div>
     </ErrorBoundary>

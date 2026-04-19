@@ -1,6 +1,6 @@
 import type { StateCreator } from 'zustand';
 import type { StoreState } from '../index';
-import { createWorkspace, generateId, type Pane, type PaneLeaf, type SessionData, type Workspace, type WorkspaceMetadata } from '../../../shared/types';
+import { createWorkspace, generateId, BUILTIN_TEMPLATES, type Pane, type PaneLeaf, type SessionData, type Workspace, type WorkspaceMetadata } from '../../../shared/types';
 import { getPresetById } from '../../../shared/layoutPresets';
 import { setLocale as i18nSetLocale, type Locale } from '../../i18n';
 import { applyCustomCssVars, migrateThemeId } from '../../themes';
@@ -187,6 +187,16 @@ export const createWorkspaceSlice: StateCreator<StoreState, [['zustand/immer', n
       if (data.sessionStartTime != null) state.sessionStartTime = data.sessionStartTime;
       if (data.tokenDataByPty) state.tokenDataByPty = data.tokenDataByPty;
       if (data.onboardingCompleted != null) state.onboardingCompleted = data.onboardingCompleted;
+      if (data.floatingPanePtyId !== undefined) state.floatingPanePtyId = data.floatingPanePtyId ?? null;
+      if (data.layoutTemplates) {
+        // Restore user-saved templates merged with current builtins
+        state.layoutTemplates = [
+          ...BUILTIN_TEMPLATES,
+          ...data.layoutTemplates.filter((t) => !t.builtin),
+        ];
+      }
+      if (data.recentCommands) state.recentCommands = data.recentCommands;
+      if (data.prefixConfig) state.prefixConfig = data.prefixConfig;
     }),
   };
 };

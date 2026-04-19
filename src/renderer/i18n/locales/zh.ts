@@ -31,6 +31,7 @@ export const zh = {
   'search.prevTooltip': '上一个结果 (Shift+Enter)',
   'search.nextTooltip': '下一个结果 (Enter)',
   'search.closeTooltip': '关闭 (ESC)',
+  'search.regexTooltip': '使用正则表达式',
 
   // Notification
   'notification.title': '通知',
@@ -53,14 +54,24 @@ export const zh = {
   'palette.cmd.showNotifications': '显示通知',
   'palette.cmd.openSettings': '打开设置',
   'palette.cmd.openBrowser': '打开浏览器',
+  'palette.cmd.saveLayout': '将当前布局保存为模板',
+  'palette.cmd.layoutPrefix': '布局: ',
   'palette.catWorkspace': '工作区',
   'palette.catSurface': '界面',
   'palette.catCommand': '命令',
+  'palette.catRecent': '最近',
 
   // Terminal
   'terminal.exited': '进程已退出，代码 {code}',
   'terminal.exitedBracket': '[进程已退出，代码 {code}]',
   'terminal.copied': '已复制!',
+  'terminal.bookmarkAdded': '已添加书签',
+
+  // Context menu
+  'contextMenu.copy': '复制',
+  'contextMenu.paste': '粘贴',
+  'contextMenu.openLink': '打开链接',
+  'contextMenu.copyLink': '复制链接',
 
   // Browser
   'browser.urlPlaceholder': '输入URL...',
@@ -138,12 +149,37 @@ export const zh = {
   'settings.sc.viCopyMode': 'Vi 复制模式',
   'settings.sc.renameWorkspace': '重命名工作区',
   'settings.sc.highlightPane': '高亮活动面板',
+  'settings.sc.floatingPane': '切换浮动终端',
   'settings.shortcutsNotAvailable': '快捷键自定义暂不可用。',
   'settings.aboutTagline': 'Windows 原生 AI 代理终端',
   'settings.builtWith': '构建工具',
   'settings.links': '链接',
   'settings.githubRepo': 'GitHub 仓库',
   'settings.toggleHint': 'Ctrl+, 切换',
+
+  // Prefix mode
+  'settings.prefixMode': '前缀模式 (tmux 风格)',
+  'settings.prefixKey': '前缀键',
+  'settings.prefixKeyDesc': 'Ctrl + 此键进入前缀模式',
+  'settings.prefixBindings': '前缀绑定',
+  'settings.prefixAction': '动作',
+  'settings.prefixTrigger': '按键',
+  'settings.prefixAddBinding': '添加绑定',
+  'settings.prefixReset': '恢复默认',
+  'settings.prefixResetConfirm': '确定要将所有前缀设置恢复为默认吗？',
+  'settings.prefix.splitHorizontal': '水平分割',
+  'settings.prefix.splitVertical': '垂直分割',
+  'settings.prefix.closePane': '关闭面板',
+  'settings.prefix.newWorkspace': '新建工作区',
+  'settings.prefix.nextWorkspace': '下一个工作区',
+  'settings.prefix.prevWorkspace': '上一个工作区',
+  'settings.prefix.hideWindow': '隐藏窗口',
+  'settings.prefix.toggleZoom': '切换缩放',
+  'settings.prefix.commandPalette': '命令面板',
+  'settings.prefix.focusUp': '向上聚焦',
+  'settings.prefix.focusDown': '向下聚焦',
+  'settings.prefix.focusLeft': '向左聚焦',
+  'settings.prefix.focusRight': '向右聚焦',
 
   // Custom keybindings
   'settings.customKeybindings': '自定义快捷键',
@@ -174,6 +210,10 @@ export const zh = {
   'settings.customTheme': '自定义主题',
   'settings.baseOnPreset': '基于预设',
   'settings.selectPreset': '选择...',
+
+  // Floating pane (Quake-style dropdown terminal)
+  'floatingPane.title': '终端',
+  'floatingPane.close': '关闭',
 
   // First-run auto-update prompt
   'firstRun.autoUpdateTitle': '自动更新',

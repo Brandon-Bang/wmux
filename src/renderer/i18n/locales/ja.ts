@@ -31,6 +31,7 @@ export const ja = {
   'search.prevTooltip': '前の結果 (Shift+Enter)',
   'search.nextTooltip': '次の結果 (Enter)',
   'search.closeTooltip': '閉じる (ESC)',
+  'search.regexTooltip': '正規表現を使用',
 
   // Notification
   'notification.title': '通知',
@@ -53,14 +54,24 @@ export const ja = {
   'palette.cmd.showNotifications': '通知を表示',
   'palette.cmd.openSettings': '設定を開く',
   'palette.cmd.openBrowser': 'ブラウザを開く',
+  'palette.cmd.saveLayout': '現在のレイアウトをテンプレートとして保存',
+  'palette.cmd.layoutPrefix': 'レイアウト: ',
   'palette.catWorkspace': 'ワークスペース',
   'palette.catSurface': 'サーフェス',
   'palette.catCommand': 'コマンド',
+  'palette.catRecent': '最近',
 
   // Terminal
   'terminal.exited': 'プロセスがコード {code} で終了しました',
   'terminal.exitedBracket': '[プロセスがコード {code} で終了しました]',
   'terminal.copied': 'コピーしました!',
+  'terminal.bookmarkAdded': 'ブックマークを追加',
+
+  // Context menu
+  'contextMenu.copy': 'コピー',
+  'contextMenu.paste': '貼り付け',
+  'contextMenu.openLink': 'リンクを開く',
+  'contextMenu.copyLink': 'リンクをコピー',
 
   // Browser
   'browser.urlPlaceholder': 'URLを入力...',
@@ -138,12 +149,37 @@ export const ja = {
   'settings.sc.viCopyMode': 'Viコピーモード',
   'settings.sc.renameWorkspace': 'ワークスペースの名前変更',
   'settings.sc.highlightPane': 'アクティブペインをハイライト',
+  'settings.sc.floatingPane': 'フローティングターミナル切替',
   'settings.shortcutsNotAvailable': 'ショートカットのカスタマイズはまだ利用できません。',
   'settings.aboutTagline': 'Windows ネイティブ AI エージェントターミナル',
   'settings.builtWith': '使用技術',
   'settings.links': 'リンク',
   'settings.githubRepo': 'GitHubリポジトリ',
   'settings.toggleHint': 'Ctrl+, で切替',
+
+  // Prefix mode
+  'settings.prefixMode': 'プレフィックスモード (tmuxスタイル)',
+  'settings.prefixKey': 'プレフィックスキー',
+  'settings.prefixKeyDesc': 'Ctrl + このキーでプレフィックスモードに入る',
+  'settings.prefixBindings': 'プレフィックスバインド',
+  'settings.prefixAction': 'アクション',
+  'settings.prefixTrigger': 'キー',
+  'settings.prefixAddBinding': 'バインド追加',
+  'settings.prefixReset': 'デフォルトに戻す',
+  'settings.prefixResetConfirm': 'すべてのプレフィックス設定をデフォルトに戻しますか？',
+  'settings.prefix.splitHorizontal': '水平分割',
+  'settings.prefix.splitVertical': '垂直分割',
+  'settings.prefix.closePane': 'ペインを閉じる',
+  'settings.prefix.newWorkspace': '新ワークスペース',
+  'settings.prefix.nextWorkspace': '次のワークスペース',
+  'settings.prefix.prevWorkspace': '前のワークスペース',
+  'settings.prefix.hideWindow': 'ウィンドウを隠す',
+  'settings.prefix.toggleZoom': 'ズーム切替',
+  'settings.prefix.commandPalette': 'コマンドパレット',
+  'settings.prefix.focusUp': '上にフォーカス',
+  'settings.prefix.focusDown': '下にフォーカス',
+  'settings.prefix.focusLeft': '左にフォーカス',
+  'settings.prefix.focusRight': '右にフォーカス',
 
   // Custom keybindings
   'settings.customKeybindings': 'カスタムキーバインド',
@@ -174,6 +210,10 @@ export const ja = {
   'settings.customTheme': 'カスタムテーマ',
   'settings.baseOnPreset': 'プリセットを元に',
   'settings.selectPreset': '選択...',
+
+  // Floating pane (Quake-style dropdown terminal)
+  'floatingPane.title': 'ターミナル',
+  'floatingPane.close': '閉じる',
 
   // First-run auto-update prompt
   'firstRun.autoUpdateTitle': '自動アップデート',

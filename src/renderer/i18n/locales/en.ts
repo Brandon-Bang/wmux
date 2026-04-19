@@ -31,6 +31,7 @@ export const en = {
   'search.prevTooltip': 'Previous result (Shift+Enter)',
   'search.nextTooltip': 'Next result (Enter)',
   'search.closeTooltip': 'Close (ESC)',
+  'search.regexTooltip': 'Use regular expression',
 
   // Notification
   'notification.title': 'Notifications',
@@ -53,14 +54,24 @@ export const en = {
   'palette.cmd.showNotifications': 'Show Notifications',
   'palette.cmd.openSettings': 'Open Settings',
   'palette.cmd.openBrowser': 'Open Browser',
+  'palette.cmd.saveLayout': 'Save Current Layout as Template',
+  'palette.cmd.layoutPrefix': 'Layout: ',
   'palette.catWorkspace': 'Workspace',
   'palette.catSurface': 'Surface',
   'palette.catCommand': 'Command',
+  'palette.catRecent': 'Recent',
 
   // Terminal
   'terminal.exited': 'Process exited with code {code}',
   'terminal.exitedBracket': '[Process exited with code {code}]',
   'terminal.copied': 'Copied!',
+  'terminal.bookmarkAdded': 'Bookmark added',
+
+  // Context menu
+  'contextMenu.copy': 'Copy',
+  'contextMenu.paste': 'Paste',
+  'contextMenu.openLink': 'Open Link',
+  'contextMenu.copyLink': 'Copy Link',
 
   // Browser
   'browser.urlPlaceholder': 'Enter URL...',
@@ -138,12 +149,37 @@ export const en = {
   'settings.sc.viCopyMode': 'Vi copy mode',
   'settings.sc.renameWorkspace': 'Rename workspace',
   'settings.sc.highlightPane': 'Highlight active pane',
+  'settings.sc.floatingPane': 'Toggle floating terminal',
   'settings.shortcutsNotAvailable': 'Built-in shortcut customization is not yet available.',
   'settings.aboutTagline': 'Windows native AI agent terminal',
   'settings.builtWith': 'Built with',
   'settings.links': 'Links',
   'settings.githubRepo': 'GitHub Repository',
   'settings.toggleHint': 'Ctrl+, to toggle',
+
+  // Prefix mode
+  'settings.prefixMode': 'Prefix Mode (tmux-style)',
+  'settings.prefixKey': 'Prefix key',
+  'settings.prefixKeyDesc': 'Ctrl + this key enters prefix mode',
+  'settings.prefixBindings': 'Prefix bindings',
+  'settings.prefixAction': 'Action',
+  'settings.prefixTrigger': 'Key',
+  'settings.prefixAddBinding': 'Add binding',
+  'settings.prefixReset': 'Reset to defaults',
+  'settings.prefixResetConfirm': 'Reset all prefix settings to defaults?',
+  'settings.prefix.splitHorizontal': 'Split horizontal',
+  'settings.prefix.splitVertical': 'Split vertical',
+  'settings.prefix.closePane': 'Close pane',
+  'settings.prefix.newWorkspace': 'New workspace',
+  'settings.prefix.nextWorkspace': 'Next workspace',
+  'settings.prefix.prevWorkspace': 'Previous workspace',
+  'settings.prefix.hideWindow': 'Hide window',
+  'settings.prefix.toggleZoom': 'Toggle zoom',
+  'settings.prefix.commandPalette': 'Command palette',
+  'settings.prefix.focusUp': 'Focus up',
+  'settings.prefix.focusDown': 'Focus down',
+  'settings.prefix.focusLeft': 'Focus left',
+  'settings.prefix.focusRight': 'Focus right',
 
   // Custom keybindings
   'settings.customKeybindings': 'Custom Keybindings',
@@ -174,6 +210,10 @@ export const en = {
   'settings.customTheme': 'Custom Theme',
   'settings.baseOnPreset': 'Base on preset',
   'settings.selectPreset': 'Select...',
+
+  // Floating pane (Quake-style dropdown terminal)
+  'floatingPane.title': 'Terminal',
+  'floatingPane.close': 'Close',
 
   // First-run auto-update prompt
   'firstRun.autoUpdateTitle': 'Automatic Updates',

@@ -788,7 +788,7 @@ function TabNotifications() {
 
 // ─── Key capture overlay ──────────────────────────────────────────────────────
 
-function KeyCaptureOverlay({ label, onCapture, onCancel }: { label: string; onCapture: (key: string) => void; onCancel: () => void }) {
+function KeyCaptureOverlay({ label, onCapture, onCancel }: { label: string; onCapture: (key: string, code: string) => void; onCancel: () => void }) {
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       e.preventDefault();
@@ -803,7 +803,7 @@ function KeyCaptureOverlay({ label, onCapture, onCancel }: { label: string; onCa
       if (k.length === 1) k = k.toUpperCase();
       if (!['Control', 'Shift', 'Alt', 'Meta'].includes(k)) {
         parts.push(k);
-        onCapture(parts.join('+'));
+        onCapture(parts.join('+'), e.code);
       }
     };
     window.addEventListener('keydown', handler, true);
@@ -828,6 +828,35 @@ function KeyCaptureOverlay({ label, onCapture, onCancel }: { label: string; onCa
   );
 }
 
+// ─── Prefix key code to display name ─────────────────────────────────────────
+
+const KEY_CODE_DISPLAY: Record<string, string> = {
+  KeyA: 'A', KeyB: 'B', KeyC: 'C', KeyD: 'D', KeyE: 'E', KeyF: 'F',
+  KeyG: 'G', KeyH: 'H', KeyI: 'I', KeyJ: 'J', KeyK: 'K', KeyL: 'L',
+  KeyM: 'M', KeyN: 'N', KeyO: 'O', KeyP: 'P', KeyQ: 'Q', KeyR: 'R',
+  KeyS: 'S', KeyT: 'T', KeyU: 'U', KeyV: 'V', KeyW: 'W', KeyX: 'X',
+  KeyY: 'Y', KeyZ: 'Z',
+  Digit0: '0', Digit1: '1', Digit2: '2', Digit3: '3', Digit4: '4',
+  Digit5: '5', Digit6: '6', Digit7: '7', Digit8: '8', Digit9: '9',
+  Backquote: '`', Minus: '-', Equal: '=', BracketLeft: '[', BracketRight: ']',
+  Backslash: '\\', Semicolon: ';', Quote: "'", Comma: ',', Period: '.', Slash: '/',
+};
+
+function keyCodeToDisplay(code: string): string {
+  return KEY_CODE_DISPLAY[code] || code;
+}
+
+const PREFIX_ACTION_IDS = [
+  'splitHorizontal', 'splitVertical', 'closePane',
+  'newWorkspace', 'nextWorkspace', 'prevWorkspace',
+  'hideWindow', 'toggleZoom', 'commandPalette',
+  'focusUp', 'focusDown', 'focusLeft', 'focusRight',
+] as const;
+
+function prefixActionLabel(actionId: string, t: (key: string) => string): string {
+  return t(`settings.prefix.${actionId}` as Parameters<typeof t>[0]) || actionId;
+}
+
 // ─── Shortcuts tab ────────────────────────────────────────────────────────────
 
 function TabShortcuts() {
@@ -837,7 +866,15 @@ function TabShortcuts() {
   const addKeybinding = useStore((s) => s.addKeybinding);
   const updateKeybinding = useStore((s) => s.updateKeybinding);
   const removeKeybinding = useStore((s) => s.removeKeybinding);
+  const prefixConfig = useStore((s) => s.prefixConfig);
+  const setPrefixKey = useStore((s) => s.setPrefixKey);
+  const setPrefixBinding = useStore((s) => s.setPrefixBinding);
+  const removePrefixBinding = useStore((s) => s.removePrefixBinding);
+  const resetPrefixConfig = useStore((s) => s.resetPrefixConfig);
   const [capturingFor, setCapturingFor] = useState<string | null>(null);
+  const [capturingPrefixKey, setCapturingPrefixKey] = useState(false);
+  const [capturingBindingKey, setCapturingBindingKey] = useState<string | null>(null);
+  const [addingBinding, setAddingBinding] = useState(false);
 
   const BUILTIN_KEYS = new Set([
     'Ctrl+B', 'Ctrl+N', 'Ctrl+D', 'Ctrl+T', 'Ctrl+W', 'Ctrl+F',
@@ -847,8 +884,11 @@ function TabShortcuts() {
     'Ctrl+Shift+]', 'Ctrl+Shift+[', 'Ctrl+Shift+M',
   ]);
 
+  const prefixKeyDisplay = `Ctrl+${keyCodeToDisplay(prefixConfig.key)}`;
+  const bindingEntries = Object.entries(prefixConfig.bindings);
+
   const shortcuts = [
-    { keys: 'Ctrl+B',       description: t('settings.sc.toggleSidebar') },
+    { keys: prefixKeyDisplay,  description: t('settings.prefixMode') },
     { keys: 'Ctrl+D',       description: t('settings.sc.splitHorizontal') },
     { keys: 'Ctrl+Shift+D', description: t('settings.sc.splitVertical') },
     { keys: 'Ctrl+T',       description: t('settings.sc.newWorkspace') },
@@ -856,9 +896,10 @@ function TabShortcuts() {
     { keys: 'Ctrl+F',       description: t('settings.sc.searchTerminal') },
     { keys: 'Ctrl+K',       description: t('settings.sc.commandPalette') },
     { keys: 'Ctrl+I',       description: t('settings.sc.toggleNotifications') },
-    { keys: 'Ctrl+Shift+L', description: t('settings.sc.viCopyMode') },
-    { keys: 'Ctrl+Shift+X', description: t('settings.sc.renameWorkspace') },
+    { keys: 'Ctrl+Shift+X', description: t('settings.sc.viCopyMode') },
+    { keys: 'Ctrl+Shift+R', description: t('settings.sc.renameWorkspace') },
     { keys: 'Ctrl+Shift+H', description: t('settings.sc.highlightPane') },
+    { keys: 'Ctrl+`',       description: t('settings.sc.floatingPane') },
   ];
 
   return (
@@ -872,9 +913,130 @@ function TabShortcuts() {
           <KbdRow key={s.keys} keys={s.keys} description={s.description} />
         ))}
       </div>
-      <p className="text-[10px] text-[color:var(--text-muted)] mt-2 px-1">
-        {t('settings.shortcutsNotAvailable')}
-      </p>
+      {/* Prefix mode configuration */}
+      <SectionLabel label={t('settings.prefixMode')} />
+
+      {/* Prefix trigger key */}
+      <div
+        className="flex items-center gap-3 px-3 py-2.5 rounded-lg"
+        style={{ backgroundColor: 'var(--bg-mantle)', border: '1px solid var(--bg-surface)' }}
+      >
+        <span className="text-[11px] text-[color:var(--text-sub)] font-mono flex-1">
+          {t('settings.prefixKey')}
+        </span>
+        <span className="text-[10px] text-[color:var(--text-muted)]">{t('settings.prefixKeyDesc')}</span>
+        <button
+          className="text-[11px] font-mono px-3 py-1 rounded shrink-0"
+          style={{ backgroundColor: 'var(--bg-surface)', color: 'var(--accent-blue)', border: '1px solid var(--bg-overlay)', minWidth: 50, textAlign: 'center' }}
+          onClick={() => setCapturingPrefixKey(true)}
+        >
+          {keyCodeToDisplay(prefixConfig.key)}
+        </button>
+      </div>
+
+      {/* Prefix bindings list */}
+      <div className="text-[10px] text-[color:var(--text-muted)] mt-1 mb-1 px-1 flex items-center justify-between">
+        <span>{t('settings.prefixBindings')}</span>
+        <button
+          className="text-[10px] text-[color:var(--accent-yellow)] hover:text-[color:var(--text-main)] transition-colors"
+          onClick={() => { if (confirm(t('settings.prefixResetConfirm'))) resetPrefixConfig(); }}
+        >
+          {t('settings.prefixReset')}
+        </button>
+      </div>
+      <div
+        className="rounded-lg overflow-hidden"
+        style={{ backgroundColor: 'var(--bg-mantle)', border: '1px solid var(--bg-surface)' }}
+      >
+        {bindingEntries.length === 0 ? (
+          <p className="text-[11px] text-[color:var(--text-muted)] px-3 py-2">{t('settings.kb.noBindings')}</p>
+        ) : (
+          bindingEntries.map(([key, actionId]) => (
+            <div key={key} className="flex items-center gap-2 px-3 py-1.5" style={{ borderBottom: '1px solid var(--bg-surface)' }}>
+              <button
+                className="text-[10px] font-mono px-2 py-0.5 rounded shrink-0"
+                style={{ backgroundColor: 'var(--bg-surface)', color: 'var(--accent-green)', border: '1px solid var(--bg-overlay)', minWidth: 50, textAlign: 'center' }}
+                onClick={() => setCapturingBindingKey(key)}
+              >
+                {key}
+              </button>
+              <span className="text-[10px] text-[color:var(--text-muted)]">&rarr;</span>
+              <select
+                className="flex-1 bg-transparent text-[11px] text-[color:var(--text-sub)] font-mono outline-none cursor-pointer"
+                value={actionId}
+                onChange={(e) => {
+                  removePrefixBinding(key);
+                  setPrefixBinding(key, e.target.value);
+                }}
+              >
+                {PREFIX_ACTION_IDS.map((aid) => (
+                  <option key={aid} value={aid}>{prefixActionLabel(aid, t)}</option>
+                ))}
+              </select>
+              <button
+                className="text-[color:var(--text-subtle)] hover:text-[color:var(--accent-red)] text-xs transition-colors shrink-0"
+                onClick={() => removePrefixBinding(key)}
+                title={t('settings.kb.delete')}
+              >
+                ✕
+              </button>
+            </div>
+          ))
+        )}
+      </div>
+
+      {/* Add prefix binding */}
+      <button
+        className="mt-1 px-3 py-1.5 rounded-lg text-xs font-mono transition-colors"
+        style={{ backgroundColor: 'var(--bg-surface)', color: 'var(--accent-green)', border: '1px solid var(--bg-overlay)' }}
+        onClick={() => setAddingBinding(true)}
+      >
+        + {t('settings.prefixAddBinding')}
+      </button>
+
+      {/* Prefix key capture overlay */}
+      {capturingPrefixKey && (
+        <KeyCaptureOverlay
+          label={t('settings.prefixKey')}
+          onCapture={(_key, code) => {
+            setPrefixKey(code);
+            setCapturingPrefixKey(false);
+          }}
+          onCancel={() => setCapturingPrefixKey(false)}
+        />
+      )}
+
+      {/* Binding key capture overlay (re-assign existing binding to new key) */}
+      {capturingBindingKey && (
+        <KeyCaptureOverlay
+          label={t('settings.prefixTrigger')}
+          onCapture={(captured) => {
+            const rawKey = captured.split('+').pop() || captured;
+            const oldAction = prefixConfig.bindings[capturingBindingKey];
+            if (oldAction) {
+              removePrefixBinding(capturingBindingKey);
+              setPrefixBinding(rawKey, oldAction);
+            }
+            setCapturingBindingKey(null);
+          }}
+          onCancel={() => setCapturingBindingKey(null)}
+        />
+      )}
+
+      {/* Add new binding: capture key then pick action */}
+      {addingBinding && (
+        <KeyCaptureOverlay
+          label={t('settings.prefixTrigger')}
+          onCapture={(captured) => {
+            const rawKey = captured.split('+').pop() || captured;
+            const usedActions = new Set(Object.values(prefixConfig.bindings));
+            const firstUnused = PREFIX_ACTION_IDS.find((a) => !usedActions.has(a)) || PREFIX_ACTION_IDS[0];
+            setPrefixBinding(rawKey, firstUnused);
+            setAddingBinding(false);
+          }}
+          onCancel={() => setAddingBinding(false)}
+        />
+      )}
 
       {/* Custom keybindings */}
       <SectionLabel label={t('settings.customKeybindings')} />
@@ -955,7 +1117,7 @@ function TabShortcuts() {
       {capturingFor && (
         <KeyCaptureOverlay
           label={t('settings.kb.pressKey')}
-          onCapture={(key) => {
+          onCapture={(key, _code) => {
             if (capturingFor === 'new') {
               addKeybinding({ key, label: '', command: '', sendEnter: true });
             } else {

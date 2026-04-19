@@ -1,7 +1,20 @@
 import type { StateCreator } from 'zustand';
 import type { StoreState } from '../index';
 import { setLocale as i18nSetLocale, type Locale } from '../../i18n';
-import { generateId, type CustomKeybinding, type CustomThemeColors, type Company } from '../../../shared/types';
+import {
+  generateId,
+  createLeafPane,
+  type CustomKeybinding,
+  type CustomThemeColors,
+  type Company,
+  type LayoutTemplate,
+  type LayoutNode,
+  type Pane,
+  type PaneBranch,
+  type PrefixConfig,
+  BUILTIN_TEMPLATES,
+  DEFAULT_PREFIX_CONFIG,
+} from '../../../shared/types';
 import { applyCustomCssVars, clearCustomCssVars, DEFAULT_CUSTOM_THEME } from '../../themes';
 
 export interface UISlice {
@@ -121,11 +134,68 @@ export interface UISlice {
   prefixError: string | null;
   setPrefixMode: (active: boolean) => void;
   setPrefixError: (msg: string | null) => void;
+  prefixConfig: PrefixConfig;
+  setPrefixKey: (keyCode: string) => void;
+  setPrefixBinding: (key: string, actionId: string) => void;
+  removePrefixBinding: (key: string) => void;
+  resetPrefixConfig: () => void;
 
   // ─── Pane zoom ────────────────────────────────────────────────────
   zoomedPaneId: string | null;
   togglePaneZoom: (paneId: string) => void;
 
+  // ─── Scrollback bookmarks ─────────────────────────────────────────
+  terminalBookmarks: Record<string, number[]>;
+  addBookmark: (ptyId: string, line: number) => void;
+  removeBookmark: (ptyId: string, line: number) => void;
+  clearBookmarks: (ptyId: string) => void;
+
+  // ─── Floating pane ────────────────────────────────────────────────
+  floatingPaneVisible: boolean;
+  floatingPanePtyId: string | null;
+  toggleFloatingPane: () => void;
+  setFloatingPanePtyId: (ptyId: string) => void;
+
+  // ─── Layout templates ─────────────────────────────────────────────
+  layoutTemplates: LayoutTemplate[];
+  saveLayoutTemplate: (name: string) => void;
+  deleteLayoutTemplate: (id: string) => void;
+  applyLayoutTemplate: (templateId: string, workspaceId?: string) => void;
+
+  // ─── Recent terminal commands ─────────────────────────────────────
+  recentCommands: string[];
+  addRecentCommand: (cmd: string) => void;
+  clearRecentCommands: () => void;
+
+}
+
+// ─── Layout template helpers ───────────────────────────────────────────────
+
+function extractLayout(pane: Pane): LayoutNode {
+  if (pane.type === 'leaf') return { type: 'leaf' };
+  return {
+    type: 'branch',
+    direction: pane.direction,
+    sizes: pane.sizes ?? pane.children.map(() => 100 / pane.children.length),
+    children: pane.children.map(extractLayout),
+  };
+}
+
+function buildPaneFromLayout(node: LayoutNode): Pane {
+  if (node.type === 'leaf') return createLeafPane();
+  const branch: PaneBranch = {
+    id: generateId('pane'),
+    type: 'branch',
+    direction: node.direction,
+    sizes: node.sizes,
+    children: node.children.map(buildPaneFromLayout),
+  };
+  return branch;
+}
+
+function collectFirstLeafId(pane: Pane): string {
+  if (pane.type === 'leaf') return pane.id;
+  return collectFirstLeafId(pane.children[0]);
 }
 
 export const createUISlice: StateCreator<StoreState, [['zustand/immer', never]], [], UISlice> = (set, get) => ({
@@ -435,11 +505,111 @@ export const createUISlice: StateCreator<StoreState, [['zustand/immer', never]],
     state.prefixError = msg;
   }),
 
+  prefixConfig: { ...DEFAULT_PREFIX_CONFIG },
+
+  setPrefixKey: (keyCode) => set((state) => {
+    state.prefixConfig.key = keyCode;
+  }),
+
+  setPrefixBinding: (key, actionId) => set((state) => {
+    state.prefixConfig.bindings[key] = actionId;
+  }),
+
+  removePrefixBinding: (key) => set((state) => {
+    delete state.prefixConfig.bindings[key];
+  }),
+
+  resetPrefixConfig: () => set((state) => {
+    state.prefixConfig = { ...DEFAULT_PREFIX_CONFIG, bindings: { ...DEFAULT_PREFIX_CONFIG.bindings } };
+  }),
+
   // ─── Pane zoom ────────────────────────────────────────────────────
   zoomedPaneId: null,
 
   togglePaneZoom: (paneId) => set((state) => {
     state.zoomedPaneId = state.zoomedPaneId === paneId ? null : paneId;
+  }),
+
+  // ─── Scrollback bookmarks ─────────────────────────────────────────
+  terminalBookmarks: {},
+
+  addBookmark: (ptyId, line) => set((state) => {
+    if (!state.terminalBookmarks[ptyId]) {
+      state.terminalBookmarks[ptyId] = [];
+    }
+    const lines = state.terminalBookmarks[ptyId];
+    if (!lines.includes(line)) {
+      lines.push(line);
+      lines.sort((a, b) => a - b);
+    }
+  }),
+
+  removeBookmark: (ptyId, line) => set((state) => {
+    if (!state.terminalBookmarks[ptyId]) return;
+    state.terminalBookmarks[ptyId] = state.terminalBookmarks[ptyId].filter((l) => l !== line);
+  }),
+
+  clearBookmarks: (ptyId) => set((state) => {
+    delete state.terminalBookmarks[ptyId];
+  }),
+
+  // ─── Floating pane ────────────────────────────────────────────────
+  floatingPaneVisible: false,
+  floatingPanePtyId: null,
+
+  toggleFloatingPane: () => set((state) => {
+    state.floatingPaneVisible = !state.floatingPaneVisible;
+  }),
+
+  setFloatingPanePtyId: (ptyId) => set((state) => {
+    state.floatingPanePtyId = ptyId;
+  }),
+
+  // ─── Layout templates ─────────────────────────────────────────────
+  layoutTemplates: [...BUILTIN_TEMPLATES],
+
+  saveLayoutTemplate: (name) => set((state) => {
+    const ws = state.workspaces.find((w) => w.id === state.activeWorkspaceId);
+    if (!ws) return;
+    const tree = extractLayout(ws.rootPane);
+    const template: LayoutTemplate = {
+      id: generateId('tmpl'),
+      name: name.trim(),
+      tree,
+    };
+    state.layoutTemplates.push(template);
+  }),
+
+  deleteLayoutTemplate: (id) => set((state) => {
+    const tmpl = state.layoutTemplates.find((t) => t.id === id);
+    if (!tmpl || tmpl.builtin) return;
+    state.layoutTemplates = state.layoutTemplates.filter((t) => t.id !== id);
+  }),
+
+  applyLayoutTemplate: (templateId, workspaceId) => set((state) => {
+    const targetWsId = workspaceId || state.activeWorkspaceId;
+    const ws = state.workspaces.find((w) => w.id === targetWsId);
+    if (!ws) return;
+    const tmpl = state.layoutTemplates.find((t) => t.id === templateId);
+    if (!tmpl) return;
+    const newRoot = buildPaneFromLayout(tmpl.tree);
+    ws.rootPane = newRoot;
+    ws.activePaneId = collectFirstLeafId(newRoot);
+    state.zoomedPaneId = null;
+  }),
+
+  // ─── Recent terminal commands ─────────────────────────────────────
+  recentCommands: [],
+
+  addRecentCommand: (cmd) => set((state) => {
+    const idx = state.recentCommands.indexOf(cmd);
+    if (idx >= 0) state.recentCommands.splice(idx, 1);
+    state.recentCommands.push(cmd);
+    if (state.recentCommands.length > 100) state.recentCommands.shift();
+  }),
+
+  clearRecentCommands: () => set((state) => {
+    state.recentCommands = [];
   }),
 
 });

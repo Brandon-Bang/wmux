@@ -8,6 +8,9 @@ export interface PaneSlice {
   closePane: (paneId: string) => void;
   setActivePane: (paneId: string) => void;
   focusPaneDirection: (direction: 'up' | 'down' | 'left' | 'right') => void;
+  updatePaneSizes: (branchId: string, sizes: number[]) => void;
+  resizeActivePane: (direction: 'left' | 'right' | 'up' | 'down', amount: number) => void;
+  equalizePaneSizes: () => void;
 }
 
 function findPane(root: Pane, id: string): Pane | null {
@@ -118,6 +121,62 @@ export const createPaneSlice: StateCreator<StoreState, [['zustand/immer', never]
     if (findPane(ws.rootPane, paneId)) {
       ws.activePaneId = paneId;
     }
+  }),
+
+  updatePaneSizes: (branchId, sizes) => set((state: StoreState) => {
+    const ws = state.workspaces.find((w: Workspace) => w.id === state.activeWorkspaceId);
+    if (!ws) return;
+    const branch = findPane(ws.rootPane, branchId);
+    if (branch && branch.type === 'branch') {
+      branch.sizes = sizes;
+    }
+  }),
+
+  resizeActivePane: (direction, amount) => set((state: StoreState) => {
+    const ws = state.workspaces.find((w: Workspace) => w.id === state.activeWorkspaceId);
+    if (!ws) return;
+    const parent = findParent(ws.rootPane, ws.activePaneId);
+    if (!parent || parent.type !== 'branch') return;
+
+    const idx = parent.children.findIndex((c) => {
+      if (c.type === 'leaf') return c.id === ws.activePaneId;
+      return collectLeafIds(c).includes(ws.activePaneId);
+    });
+    if (idx < 0) return;
+
+    const isHorizontal = parent.direction === 'horizontal';
+    const isGrow =
+      (isHorizontal && direction === 'right') ||
+      (!isHorizontal && direction === 'down');
+    const isShrink =
+      (isHorizontal && direction === 'left') ||
+      (!isHorizontal && direction === 'up');
+
+    if (!isGrow && !isShrink) return;
+
+    const sizes = parent.sizes
+      ? [...parent.sizes]
+      : parent.children.map(() => 100 / parent.children.length);
+
+    const neighborIdx = isGrow ? idx + 1 : idx - 1;
+    if (neighborIdx < 0 || neighborIdx >= sizes.length) return;
+
+    const delta = isGrow ? amount : -amount;
+    const newSize = Math.max(10, sizes[idx] + delta);
+    const newNeighborSize = Math.max(10, sizes[neighborIdx] - delta);
+
+    sizes[idx] = newSize;
+    sizes[neighborIdx] = newNeighborSize;
+    parent.sizes = sizes;
+  }),
+
+  equalizePaneSizes: () => set((state: StoreState) => {
+    const ws = state.workspaces.find((w: Workspace) => w.id === state.activeWorkspaceId);
+    if (!ws) return;
+    const parent = findParent(ws.rootPane, ws.activePaneId);
+    if (!parent || parent.type !== 'branch') return;
+    const equal = 100 / parent.children.length;
+    parent.sizes = parent.children.map(() => equal);
   }),
 
   focusPaneDirection: (direction) => set((state: StoreState) => {

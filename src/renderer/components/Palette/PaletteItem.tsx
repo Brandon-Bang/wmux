@@ -1,7 +1,7 @@
 import React from 'react';
 import { useT } from '../../hooks/useT';
 
-export type PaletteCategory = 'workspace' | 'surface' | 'command';
+export type PaletteCategory = 'workspace' | 'surface' | 'command' | 'recent';
 
 export interface PaletteItemData {
   id: string;
@@ -21,6 +21,7 @@ const categoryColor: Record<PaletteCategory, string> = {
   workspace: 'text-[var(--accent-blue)]',
   surface: 'text-[var(--accent-green)]',
   command: 'text-[var(--accent-purple)]',
+  recent: 'text-[var(--accent-yellow)]',
 };
 
 export default function PaletteItem({ item, isActive, onClick }: PaletteItemProps) {
@@ -30,6 +31,7 @@ export default function PaletteItem({ item, isActive, onClick }: PaletteItemProp
     workspace: t('palette.catWorkspace'),
     surface: t('palette.catSurface'),
     command: t('palette.catCommand'),
+    recent: t('palette.catRecent'),
   };
 
   return (

@@ -1,23 +1,27 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { useT } from '../../hooks/useT';
 
+const MAX_HISTORY = 50;
+const searchHistory: string[] = [];
+
 interface SearchBarProps {
-  onFindNext: (text: string) => void;
-  onFindPrevious: (text: string) => void;
+  onFindNext: (text: string, useRegex?: boolean) => void;
+  onFindPrevious: (text: string, useRegex?: boolean) => void;
   onClose: () => void;
 }
 
 export default function SearchBar({ onFindNext, onFindPrevious, onClose }: SearchBarProps) {
   const t = useT();
   const [query, setQuery] = useState('');
+  const [useRegex, setUseRegex] = useState(false);
+  const [historyIdx, setHistoryIdx] = useState(-1);
+  const savedQueryRef = useRef('');
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // 마운트 시 입력 필드에 포커스
   useEffect(() => {
     inputRef.current?.focus();
   }, []);
 
-  // ESC 키로 닫기
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
@@ -30,18 +34,51 @@ export default function SearchBar({ onFindNext, onFindPrevious, onClose }: Searc
   }, [onClose]);
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (searchHistory.length === 0) return;
+      if (historyIdx === -1) savedQueryRef.current = query;
+      const newIdx = Math.min(historyIdx + 1, searchHistory.length - 1);
+      setHistoryIdx(newIdx);
+      setQuery(searchHistory[searchHistory.length - 1 - newIdx]);
+      return;
+    }
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (historyIdx <= 0) {
+        setHistoryIdx(-1);
+        setQuery(savedQueryRef.current);
+        return;
+      }
+      const newIdx = historyIdx - 1;
+      setHistoryIdx(newIdx);
+      setQuery(searchHistory[searchHistory.length - 1 - newIdx]);
+      return;
+    }
     if (e.key === 'Enter') {
       e.preventDefault();
+      if (query.trim()) {
+        const existing = searchHistory.indexOf(query);
+        if (existing >= 0) searchHistory.splice(existing, 1);
+        searchHistory.push(query);
+        if (searchHistory.length > MAX_HISTORY) searchHistory.shift();
+        setHistoryIdx(-1);
+      }
       if (e.shiftKey) {
-        onFindPrevious(query);
+        onFindPrevious(query, useRegex);
       } else {
-        onFindNext(query);
+        onFindNext(query, useRegex);
       }
     }
-  }, [query, onFindNext, onFindPrevious]);
+  }, [query, useRegex, historyIdx, onFindNext, onFindPrevious]);
 
   const handleChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     setQuery(e.target.value);
+    setHistoryIdx(-1);
+  }, []);
+
+  const toggleRegex = useCallback(() => {
+    setUseRegex((prev) => !prev);
   }, []);
 
   return (
@@ -53,10 +90,9 @@ export default function SearchBar({ onFindNext, onFindPrevious, onClose }: Searc
         borderTop: 'none',
         minWidth: '280px',
       }}
-      // 클릭이 Pane의 handleClick까지 버블링되지 않도록 차단
       onClick={(e) => e.stopPropagation()}
     >
-      {/* 검색 아이콘 */}
+      {/* Search icon */}
       <svg
         width="13"
         height="13"
@@ -69,7 +105,7 @@ export default function SearchBar({ onFindNext, onFindPrevious, onClose }: Searc
         <line x1="10" y1="10" x2="14" y2="14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
       </svg>
 
-      {/* 입력 필드 */}
+      {/* Input */}
       <input
         ref={inputRef}
         type="text"
@@ -86,9 +122,22 @@ export default function SearchBar({ onFindNext, onFindPrevious, onClose }: Searc
         spellCheck={false}
       />
 
-      {/* 이전 버튼 (Shift+Enter) */}
+      {/* Regex toggle */}
       <button
-        onClick={() => onFindPrevious(query)}
+        onClick={toggleRegex}
+        title={t('search.regexTooltip')}
+        className="flex items-center justify-center w-5 h-5 rounded transition-colors shrink-0"
+        style={{
+          background: useRegex ? 'var(--accent-yellow)' : 'transparent',
+          color: useRegex ? 'var(--bg-base)' : 'var(--text-sub2)',
+        }}
+      >
+        <span className="text-[10px] font-bold leading-none">.*</span>
+      </button>
+
+      {/* Previous (Shift+Enter) */}
+      <button
+        onClick={() => onFindPrevious(query, useRegex)}
         title={t('search.prevTooltip')}
         className="flex items-center justify-center w-5 h-5 rounded transition-colors hover:bg-[var(--bg-overlay)] text-[var(--text-sub2)] hover:text-[var(--text-main)] shrink-0"
       >
@@ -98,9 +147,9 @@ export default function SearchBar({ onFindNext, onFindPrevious, onClose }: Searc
         </svg>
       </button>
 
-      {/* 다음 버튼 (Enter) */}
+      {/* Next (Enter) */}
       <button
-        onClick={() => onFindNext(query)}
+        onClick={() => onFindNext(query, useRegex)}
         title={t('search.nextTooltip')}
         className="flex items-center justify-center w-5 h-5 rounded transition-colors hover:bg-[var(--bg-overlay)] text-[var(--text-sub2)] hover:text-[var(--text-main)] shrink-0"
       >
@@ -110,7 +159,7 @@ export default function SearchBar({ onFindNext, onFindPrevious, onClose }: Searc
         </svg>
       </button>
 
-      {/* 닫기 버튼 */}
+      {/* Close */}
       <button
         onClick={onClose}
         title={t('search.closeTooltip')}

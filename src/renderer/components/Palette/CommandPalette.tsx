@@ -48,6 +48,27 @@ function IconCommand() {
   );
 }
 
+function IconGrid() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect x="1" y="1" width="5" height="5" rx="0.8" stroke="currentColor" strokeWidth="1.2" />
+      <rect x="8" y="1" width="5" height="5" rx="0.8" stroke="currentColor" strokeWidth="1.2" />
+      <rect x="1" y="8" width="5" height="5" rx="0.8" stroke="currentColor" strokeWidth="1.2" />
+      <rect x="8" y="8" width="5" height="5" rx="0.8" stroke="currentColor" strokeWidth="1.2" />
+    </svg>
+  );
+}
+
+function IconSave() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M2 2h8l2 2v8a1 1 0 01-1 1H3a1 1 0 01-1-1V3a1 1 0 011-1z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+      <rect x="4.5" y="1" width="5" height="4" rx="0.5" stroke="currentColor" strokeWidth="1.2" />
+      <rect x="3" y="7.5" width="8" height="4" rx="0.5" stroke="currentColor" strokeWidth="1.2" />
+    </svg>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Fuzzy match helper
 // Scores a string against a query. Returns null if no match, else a score
@@ -97,6 +118,7 @@ export default function CommandPalette() {
   const setVisible = useStore((s) => s.setCommandPaletteVisible);
   const workspaces = useStore((s) => s.workspaces);
   const activeWorkspaceId = useStore((s) => s.activeWorkspaceId);
+  const layoutTemplates = useStore((s) => s.layoutTemplates);
 
   const [query, setQuery] = useState('');
   const [activeIdx, setActiveIdx] = useState(0);
@@ -107,6 +129,9 @@ export default function CommandPalette() {
   // -------------------------------------------------------------------------
   // Build item list
   // -------------------------------------------------------------------------
+
+  const recentCommands = useStore((s) => s.recentCommands);
+  const togglePalette = useStore((s) => s.toggleCommandPalette);
 
   const buildItems = useCallback((): PaletteItemData[] => {
     const items: PaletteItemData[] = [];
@@ -347,8 +372,74 @@ export default function CommandPalette() {
       });
     }
 
+    // Layout template commands
+    for (const tmpl of layoutTemplates) {
+      items.push({
+        id: `template-${tmpl.id}`,
+        label: `${t('palette.cmd.layoutPrefix')}${tmpl.name}`,
+        category: 'command' as PaletteCategory,
+        icon: <IconGrid />,
+        action: () => {
+          useStore.getState().applyLayoutTemplate(tmpl.id);
+          setVisible(false);
+        },
+      });
+    }
+
+    items.push({
+      id: 'save-layout',
+      label: t('palette.cmd.saveLayout'),
+      category: 'command' as PaletteCategory,
+      icon: <IconSave />,
+      action: () => {
+        const name = prompt('Template name:');
+        if (name?.trim()) useStore.getState().saveLayoutTemplate(name.trim());
+        setVisible(false);
+      },
+    });
+
+    // Recent terminal commands — show most recent first, max 20
+    const recentReversed = [...recentCommands].reverse().slice(0, 20);
+    for (const cmd of recentReversed) {
+      items.push({
+        id: `recent-${cmd}`,
+        label: cmd,
+        category: 'recent' as PaletteCategory,
+        icon: (
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+            <path d="M8 3v5l3 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+            <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.5" />
+          </svg>
+        ),
+        action: () => {
+          const ws = useStore.getState().workspaces.find(
+            (w) => w.id === useStore.getState().activeWorkspaceId,
+          );
+          if (!ws) { togglePalette(); return; }
+          const findPaneLeaf = (pane: import('../../../shared/types').Pane, id: string): import('../../../shared/types').PaneLeaf | null => {
+            if (pane.id === id && pane.type === 'leaf') return pane;
+            if (pane.type === 'branch') {
+              for (const child of pane.children) {
+                const found = findPaneLeaf(child, id);
+                if (found) return found;
+              }
+            }
+            return null;
+          };
+          const pane = findPaneLeaf(ws.rootPane, ws.activePaneId);
+          if (pane) {
+            const surface = pane.surfaces.find((s) => s.id === pane.activeSurfaceId);
+            if (surface?.ptyId) {
+              window.electronAPI.pty.write(surface.ptyId, cmd);
+            }
+          }
+          togglePalette();
+        },
+      });
+    }
+
     return items;
-  }, [workspaces, activeWorkspaceId, setVisible, ipcInvoke]);
+  }, [workspaces, activeWorkspaceId, layoutTemplates, setVisible, ipcInvoke, recentCommands, togglePalette]);
 
   // -------------------------------------------------------------------------
   // Filtered + scored results — useMemo to cache across renders

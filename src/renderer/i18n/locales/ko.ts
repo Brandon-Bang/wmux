@@ -31,6 +31,7 @@ export const ko = {
   'search.prevTooltip': '이전 결과 (Shift+Enter)',
   'search.nextTooltip': '다음 결과 (Enter)',
   'search.closeTooltip': '닫기 (ESC)',
+  'search.regexTooltip': '정규식 사용',
 
   // Notification
   'notification.title': '알림',
@@ -53,14 +54,24 @@ export const ko = {
   'palette.cmd.showNotifications': '알림 보기',
   'palette.cmd.openSettings': '설정 열기',
   'palette.cmd.openBrowser': '브라우저 열기',
+  'palette.cmd.saveLayout': '현재 레이아웃을 템플릿으로 저장',
+  'palette.cmd.layoutPrefix': '레이아웃: ',
   'palette.catWorkspace': '워크스페이스',
   'palette.catSurface': '서피스',
   'palette.catCommand': '커맨드',
+  'palette.catRecent': '최근',
 
   // Terminal
   'terminal.exited': '프로세스가 코드 {code}로 종료됨',
   'terminal.exitedBracket': '[프로세스가 코드 {code}로 종료됨]',
   'terminal.copied': '복사됨!',
+  'terminal.bookmarkAdded': '북마크 추가됨',
+
+  // Context menu
+  'contextMenu.copy': '복사',
+  'contextMenu.paste': '붙여넣기',
+  'contextMenu.openLink': '링크 열기',
+  'contextMenu.copyLink': '링크 복사',
 
   // Browser
   'browser.urlPlaceholder': 'URL 입력...',
@@ -138,12 +149,37 @@ export const ko = {
   'settings.sc.viCopyMode': 'Vi 복사 모드',
   'settings.sc.renameWorkspace': '작업공간 이름 변경',
   'settings.sc.highlightPane': '활성 창 강조',
+  'settings.sc.floatingPane': '플로팅 터미널 전환',
   'settings.shortcutsNotAvailable': '내장 단축키 커스터마이즈는 아직 지원되지 않습니다.',
   'settings.aboutTagline': 'Windows 네이티브 AI 에이전트 터미널',
   'settings.builtWith': '사용 기술',
   'settings.links': '링크',
   'settings.githubRepo': 'GitHub 저장소',
   'settings.toggleHint': 'Ctrl+, 으로 전환',
+
+  // Prefix mode
+  'settings.prefixMode': '프리픽스 모드 (tmux 스타일)',
+  'settings.prefixKey': '프리픽스 키',
+  'settings.prefixKeyDesc': 'Ctrl + 이 키로 프리픽스 모드 진입',
+  'settings.prefixBindings': '프리픽스 바인딩',
+  'settings.prefixAction': '동작',
+  'settings.prefixTrigger': '키',
+  'settings.prefixAddBinding': '바인딩 추가',
+  'settings.prefixReset': '기본값으로 초기화',
+  'settings.prefixResetConfirm': '모든 프리픽스 설정을 기본값으로 초기화하시겠습니까?',
+  'settings.prefix.splitHorizontal': '가로 분할',
+  'settings.prefix.splitVertical': '세로 분할',
+  'settings.prefix.closePane': '창 닫기',
+  'settings.prefix.newWorkspace': '새 워크스페이스',
+  'settings.prefix.nextWorkspace': '다음 워크스페이스',
+  'settings.prefix.prevWorkspace': '이전 워크스페이스',
+  'settings.prefix.hideWindow': '창 숨기기',
+  'settings.prefix.toggleZoom': '줌 전환',
+  'settings.prefix.commandPalette': '명령 팔레트',
+  'settings.prefix.focusUp': '위로 포커스',
+  'settings.prefix.focusDown': '아래로 포커스',
+  'settings.prefix.focusLeft': '왼쪽으로 포커스',
+  'settings.prefix.focusRight': '오른쪽으로 포커스',
 
   // Custom keybindings
   'settings.customKeybindings': '커스텀 키바인딩',
@@ -174,6 +210,10 @@ export const ko = {
   'settings.customTheme': '커스텀 테마',
   'settings.baseOnPreset': '프리셋 기반으로',
   'settings.selectPreset': '선택...',
+
+  // Floating pane (Quake-style dropdown terminal)
+  'floatingPane.title': '터미널',
+  'floatingPane.close': '닫기',
 
   // First-run auto-update prompt
   'firstRun.autoUpdateTitle': '자동 업데이트',

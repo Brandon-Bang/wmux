@@ -29,6 +29,16 @@ Gemini CLI runs tests at the bottom
 
 ## Install in 30 seconds
 
+**Winget (recommended):**
+```powershell
+winget install openwong2kim.wmux
+```
+
+**Chocolatey:**
+```powershell
+choco install wmux
+```
+
 **Installer:**
 
 [Download wmux Setup.exe](https://github.com/openwong2kim/wmux/releases/latest)
@@ -60,6 +70,14 @@ Claude: browser_open → browser_snapshot → browser_fill(ref=13, "wmux") → b
 
 ConPTY-based native Windows terminal. xterm.js + WebGL hardware-accelerated rendering. 999K lines of scrollback. Terminal content persists even after restart.
 
+**Tmux-style prefix mode** — `Ctrl+B` then a single action key (split, focus, new workspace…) for muscle-memory terminal navigation. 13 actions, fully rebindable.
+
+**Floating pane** — `Ctrl+\`` for a Quake-style dropdown terminal that lives outside your main layout. Stays alive across toggles.
+
+**Scroll bookmarks** — `Ctrl+M` marks the current scroll position, `Ctrl+Up/Down` jumps between marks. Indicators render on the gutter.
+
+**Smart right-click** — Windows Terminal style. Selection → instant copy. Empty area → instant paste. Link → small Open / Copy Link menu. Zero modal interrupts.
+
 ### 3. No more asking "is it done yet?"
 
 wmux tells you when your AI agent finishes.
@@ -85,10 +103,14 @@ Launch wmux and the MCP server registers automatically. Claude Code just works:
 | Execute JS | `browser_evaluate` |
 | Press key | `browser_press_key` |
 | Read terminal | `terminal_read` |
+| Read commands semantically (OSC 133) | `terminal_read_events` |
 | Send command | `terminal_send` |
 | Manage workspaces | `workspace_list` / `surface_list` / `pane_list` |
+| Agent-to-agent messaging | `a2a_send` / `a2a_broadcast` / `a2a_whoami` |
+| Delegate tasks across agents | `a2a_task_send` / `a2a_task_query` / `a2a_task_cancel` |
+| Company mode coordination | `company_a2a_send` / `company_a2a_inbox` / `company_a2a_status` |
 
-**Multi-agent:** Every browser tool accepts `surfaceId` — each Claude Code session controls its own browser independently.
+**Multi-agent:** Every browser tool accepts `surfaceId` — each Claude Code session controls its own browser independently. A2A tools route messages between sibling agents in the same wmux instance.
 
 ### 5. Session persistence — like tmux
 
@@ -114,16 +136,27 @@ Terminal sessions survive app restarts. Close wmux and reopen — your sessions 
 ### Terminal
 - xterm.js + WebGL GPU-accelerated rendering
 - ConPTY native Windows pseudo-terminal
+- Unicode 11 width tables — correct CJK / emoji rendering for cursor-positioning TUIs (Claude Code, vim)
 - Split panes — `Ctrl+D` horizontal, `Ctrl+Shift+D` vertical
 - Tabs — multiple surfaces per pane
+- **Floating pane** — Quake-style dropdown terminal, dedicated PTY, `Ctrl+\``
+- **Smart right-click** — selection → instant copy, empty area → instant paste, link → Open / Copy Link menu
+- **Scroll bookmarks** — `Ctrl+M` mark, `Ctrl+Up/Down` jump, gutter indicators
 - Vi copy mode — `Ctrl+Shift+X`
-- Search — `Ctrl+F`
+- Search with regex toggle — `Ctrl+F`
 - 999K line scrollback with disk persistence
+- **Shell integration (OSC 133)** — semantic prompt / command boundaries for `terminal_read_events`. Auto-injected for pwsh / bash. Constrained Language Mode safe (v2.7.1).
+
+### Keybindings
+- **Tmux-style prefix mode** — `Ctrl+B` then action key, 13 default actions (splits, focus, workspaces, palette, floating pane, …)
+- Customizable bindings + custom keymaps in Settings
+- Reset-to-defaults available
 
 ### Workspaces
 - Sidebar with drag-and-drop reordering
 - `Ctrl+1~9` quick switch
 - Multiview — `Ctrl+click` to view multiple workspaces side by side
+- **Layout templates** — save current pane layout, restore via Command Palette ("recent" category)
 - Full session persistence — layout, tabs, cwd, scrollback all restored
 - One-click reset in Settings
 
@@ -177,12 +210,17 @@ English, Korean, Japanese, Chinese
 | `Ctrl+click` | Add to multiview |
 | `Ctrl+Shift+G` | Exit multiview |
 | `Ctrl+Shift+L` | Open browser |
-| `Ctrl+B` | Toggle sidebar |
+| `Ctrl+B` then `<key>` | Tmux-style prefix mode (13 actions) |
+| `Ctrl+Shift+B` | Toggle sidebar |
+| `Ctrl+\`` | Toggle floating pane (Quake-style) |
 | `Ctrl+K` | Command palette |
 | `Ctrl+I` | Notifications |
 | `Ctrl+,` | Settings |
-| `Ctrl+F` | Search terminal |
+| `Ctrl+F` | Search terminal (with regex toggle) |
+| `Ctrl+M` | Add scrollback bookmark |
+| `Ctrl+Up` / `Ctrl+Down` | Jump prev / next bookmark |
 | `Ctrl+Shift+X` | Vi copy mode |
+| Right-click | Smart copy (selection) / paste (empty) / link menu |
 | `F12` | Browser DevTools |
 
 ---

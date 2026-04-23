@@ -18,7 +18,7 @@ import { getWmuxDir } from './config';
  *   - zsh / fish           (v3 roadmap)
  */
 
-const INTEGRATION_VERSION = 2;
+const INTEGRATION_VERSION = 3;
 const VERSION_FILE = '.version';
 
 // -----------------------------------------------------------------------
@@ -50,8 +50,15 @@ if (-not (Get-Variable -Name '__wmux_prev_prompt' -Scope Global -ErrorAction Sil
 }
 
 function global:prompt {
-    # Capture exit status of the PREVIOUS command before we clobber it.
-    $ec = if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } elseif ($?) { 0 } else { 1 }
+    # Capture $? and $LASTEXITCODE as the VERY FIRST statements. Any
+    # comparison, assignment, or cmdlet call inside this function resets
+    # $? to true — so a later 'elseif ($?)' check would always take the
+    # success branch and report D;0 even after a failed command. This
+    # same trap bites VS Code / Windows Terminal integrations; the fix
+    # is to snapshot both variables before doing anything else.
+    $__wmux_ok = $?
+    $__wmux_le = $LASTEXITCODE
+    $ec = if ($null -ne $__wmux_le) { $__wmux_le } elseif ($__wmux_ok) { 0 } else { 1 }
 
     $esc = [char]27
     $bel = [char]7
@@ -68,6 +75,11 @@ function global:prompt {
 
     # B marks end of prompt / start of user input region.
     $post = "$esc]133;B$bel"
+
+    # Restore $LASTEXITCODE so downstream user tooling sees the value it
+    # would have seen without shell integration. The prompt body above
+    # may have invoked cmdlets that touched it.
+    $global:LASTEXITCODE = $__wmux_le
 
     return $pre + [string]$body + $post
 }

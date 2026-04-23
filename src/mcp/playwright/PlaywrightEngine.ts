@@ -48,6 +48,13 @@ export class PlaywrightEngine {
   private autoOpenAttempted = false;
   /** Serializes getPage calls to prevent concurrent auto-open races. */
   private getPageLock: Promise<Page | null> | null = null;
+  /**
+   * Browser-level CDP session that owns the auto-attach subscription. Held
+   * for the lifetime of `browser` and detached in `disconnect()`. Without
+   * this, every reconnect would strand an auto-attach session inside
+   * Playwright's internal connection map and leak memory over time.
+   */
+  private autoAttachSession: CDPSession | null = null;
 
   private constructor() {}
 
@@ -77,6 +84,7 @@ export class PlaywrightEngine {
         waitForDebuggerOnStart: false,
         flatten: true,
       });
+      this.autoAttachSession = session;
       console.error(`[PlaywrightEngine] Auto-attach enabled`);
     } catch (err) {
       console.error('[PlaywrightEngine] setAutoAttach warning:', err instanceof Error ? err.message : String(err));
@@ -85,8 +93,13 @@ export class PlaywrightEngine {
 
   async disconnect(): Promise<void> {
     const b = this.browser;
+    const s = this.autoAttachSession;
     this.browser = null;
     this.cdpPort = null;
+    this.autoAttachSession = null;
+    if (s) {
+      await s.detach().catch(() => { /* session may already be gone */ });
+    }
     if (b) {
       try {
         await b.close();
@@ -247,70 +260,76 @@ export class PlaywrightEngine {
         cdpSession = await this.browser.newBrowserCDPSession();
       }
 
-      // Get all targets
-      const { targetInfos } = await cdpSession.send('Target.getTargets') as {
-        targetInfos: Array<{
-          targetId: string;
-          type: string;
-          title: string;
-          url: string;
-          attached: boolean;
-          browserContextId?: string;
-        }>;
-      };
+      try {
+        // Get all targets
+        const { targetInfos } = await cdpSession.send('Target.getTargets') as {
+          targetInfos: Array<{
+            targetId: string;
+            type: string;
+            title: string;
+            url: string;
+            attached: boolean;
+            browserContextId?: string;
+          }>;
+        };
 
-      console.error(`[PlaywrightEngine] CDP targets: ${targetInfos.map(t => `${t.type}:${t.url.substring(0, 40)}`).join(', ')}`);
+        console.error(`[PlaywrightEngine] CDP targets: ${targetInfos.map(t => `${t.type}:${t.url.substring(0, 40)}`).join(', ')}`);
 
-      // Get registered wmux targets for matching
-      const info = (await sendRpc('browser.cdp.info')) as CdpInfoResponse;
-      const wmuxTarget = surfaceId
-        ? info.targets.find((t) => t.surfaceId === surfaceId)
-        : info.targets[0];
+        // Get registered wmux targets for matching
+        const info = (await sendRpc('browser.cdp.info')) as CdpInfoResponse;
+        const wmuxTarget = surfaceId
+          ? info.targets.find((t) => t.surfaceId === surfaceId)
+          : info.targets[0];
 
-      // Find the webview target — match by targetId from WebviewCdpManager
-      let webviewTarget = wmuxTarget
-        ? targetInfos.find((t) => t.targetId === wmuxTarget.targetId)
-        : undefined;
+        // Find the webview target — match by targetId from WebviewCdpManager
+        let webviewTarget = wmuxTarget
+          ? targetInfos.find((t) => t.targetId === wmuxTarget.targetId)
+          : undefined;
 
-      // Fallback: find any page target that isn't the Electron shell
-      if (!webviewTarget) {
-        webviewTarget = targetInfos.find(
-          (t) => t.type === 'page' && !isElectronShellUrl(t.url) && t.url !== 'about:blank',
-        );
-      }
+        // Fallback: find any page target that isn't the Electron shell
+        if (!webviewTarget) {
+          webviewTarget = targetInfos.find(
+            (t) => t.type === 'page' && !isElectronShellUrl(t.url) && t.url !== 'about:blank',
+          );
+        }
 
-      if (!webviewTarget) {
-        console.error('[PlaywrightEngine] No webview target found in Target.getTargets');
+        if (!webviewTarget) {
+          console.error('[PlaywrightEngine] No webview target found in Target.getTargets');
+          return null;
+        }
+
+        console.error(`[PlaywrightEngine] Found webview target: ${webviewTarget.targetId} url=${webviewTarget.url}`);
+
+        // Try to attach to the target and get a page
+        // Attach with flatten:true creates a session in the current connection
+        if (!webviewTarget.attached) {
+          await cdpSession.send('Target.attachToTarget', {
+            targetId: webviewTarget.targetId,
+            flatten: true,
+          });
+          console.error(`[PlaywrightEngine] Attached to target ${webviewTarget.targetId}`);
+        }
+
+        // After attaching, check if new pages appeared
+        await sleep(500);
+        const newPages = this.getAllPages();
+        console.error(`[PlaywrightEngine] After attach: ${newPages.length} pages`);
+
+        const matchedPage = newPages.find((p) => !isElectronShellUrl(p.url()));
+        if (matchedPage) {
+          console.error(`[PlaywrightEngine] Found page after attach: ${matchedPage.url()}`);
+          return matchedPage;
+        }
+
+        // If pages still empty, try creating a new CDP connection specifically to the webview
+        // by reconnecting — this forces Playwright to re-discover all targets
+        console.error('[PlaywrightEngine] Attach did not create a page, will retry with reconnect');
         return null;
+      } finally {
+        // Detach the probe session so it doesn't accumulate in Playwright's
+        // internal session map across repeated getPage() calls.
+        await cdpSession.detach().catch(() => { /* best-effort */ });
       }
-
-      console.error(`[PlaywrightEngine] Found webview target: ${webviewTarget.targetId} url=${webviewTarget.url}`);
-
-      // Try to attach to the target and get a page
-      // Attach with flatten:true creates a session in the current connection
-      if (!webviewTarget.attached) {
-        await cdpSession.send('Target.attachToTarget', {
-          targetId: webviewTarget.targetId,
-          flatten: true,
-        });
-        console.error(`[PlaywrightEngine] Attached to target ${webviewTarget.targetId}`);
-      }
-
-      // After attaching, check if new pages appeared
-      await sleep(500);
-      const newPages = this.getAllPages();
-      console.error(`[PlaywrightEngine] After attach: ${newPages.length} pages`);
-
-      const matchedPage = newPages.find((p) => !isElectronShellUrl(p.url()));
-      if (matchedPage) {
-        console.error(`[PlaywrightEngine] Found page after attach: ${matchedPage.url()}`);
-        return matchedPage;
-      }
-
-      // If pages still empty, try creating a new CDP connection specifically to the webview
-      // by reconnecting — this forces Playwright to re-discover all targets
-      console.error('[PlaywrightEngine] Attach did not create a page, will retry with reconnect');
-      return null;
     } catch (err) {
       console.error('[PlaywrightEngine] findViaTargetDomain error:', err instanceof Error ? err.message : String(err));
       return null;
@@ -360,17 +379,12 @@ export class PlaywrightEngine {
       console.error(`[PlaywrightEngine] Found target in /json: ${jsonTarget.id} url=${jsonTarget.url}`);
 
       // Attach to the target via browser-level CDP session (don't disconnect!)
+      // Auto-attach is already enabled by connect() on this.autoAttachSession —
+      // re-issuing Target.setAutoAttach here would just register another probe
+      // session and leak on every retry.
+      const session = await this.browser.newBrowserCDPSession();
       try {
-        const session = await this.browser.newBrowserCDPSession();
-
-        // Re-enable auto-attach to pick up the webview target
-        await session.send('Target.setAutoAttach', {
-          autoAttach: true,
-          waitForDebuggerOnStart: false,
-          flatten: true,
-        });
-
-        // Also explicitly attach to the discovered target
+        // Explicitly attach to the discovered target
         await session.send('Target.attachToTarget', {
           targetId: jsonTarget.id,
           flatten: true,
@@ -391,6 +405,8 @@ export class PlaywrightEngine {
         }
       } catch (attachErr) {
         console.error(`[PlaywrightEngine] /json attach failed: ${attachErr instanceof Error ? attachErr.message : String(attachErr)}`);
+      } finally {
+        await session.detach().catch(() => { /* best-effort */ });
       }
 
       return null;

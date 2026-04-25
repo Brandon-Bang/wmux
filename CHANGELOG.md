@@ -5,6 +5,74 @@ All notable changes to wmux are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.2] — 2026-04-25 — Stability & MCP Hardening
+
+v2.7.1 이후 누적된 안정성·보안 하드닝을 묶은 patch 릴리스다. 신규
+사용자 대상 UI 기능은 없고, 데이터 마이그레이션도 필요 없다. MCP
+통합을 사용하는 외부 클라이언트는 워크스페이스 점유 동작이 바뀌었으니
+"Changed" 항목을 한 번 확인할 것.
+
+### Fixed
+
+- **Daemon mass-kill cascade** — fb65626. 한 PTY 가 비정상 종료될 때
+  같은 워크스페이스의 다른 PTY 들까지 연쇄 종료되던 문제. 종료 사유를
+  per-PTY 로 분리해 cascade 트리거를 차단했다.
+  구현: `src/daemon/SessionManager.ts`, `src/daemon/PtySupervisor.ts`.
+- **PlaywrightEngine CDP 메모리 누수** — df37e97. `mcp__wmux__browser_*`
+  툴 호출 후 CDP 세션이 detach 되지 않아 장시간 사용 시 RAM 이 단조
+  증가하던 문제. 페이지 lifecycle 에 detach 를 묶었다.
+  구현: `src/main/browser/PlaywrightEngine.ts`.
+- **PWSH non-zero exit code 보고** — 83d584e. OSC 133 hook 이 항상 0 을
+  보고해 shell-integration 이 실패한 명령을 성공으로 표기하던 회귀.
+  `$LASTEXITCODE` 폴백을 추가했다.
+  구현: `src/main/pty/shell-hooks/pwsh.ps1`.
+- **Multiview 자동 종료** — 77e4d58. 멀티뷰에 포함되지 않은 워크스페이스로
+  전환할 때 멀티뷰가 그대로 유지되어 잘못된 팬이 화면에 남던 문제. 전환
+  시점에 멀티뷰 상태를 자동 해제한다.
+  구현: `src/renderer/store/uiSlice.ts`.
+- **우클릭 이미지 붙여넣기** — d071b08 + 889c6d8. (1) 우클릭 컨텍스트
+  메뉴에서 이미지 붙여넣기를 지원하고 (2) 공백이 포함된 임시 경로를
+  올바르게 quoting + bracketed paste 로 래핑해 셸이 명령을 즉시 실행하지
+  않도록 한다. 큰 텍스트 chunk 의 분할 전송 경로도 정리됐다.
+  구현: `src/renderer/hooks/useTerminal.ts`,
+  `src/main/clipboard/ImagePaste.ts`.
+- **Ultrareview 6 건 일괄 수정** — b79115c. SoulLoader RCE/Windows
+  비호환 경로(POSIX heredoc → IPC `fs.writeFile`), A2A CR/LF/ANSI 인젝션
+  (`safeName`/`safeBody` 가 ESC CSI 와 개행을 strip), StateWriter
+  saveImmediate race(immediateEpoch 스냅샷 보존), Squirrel 설치 파일명
+  pin (`wmux-{version}.Setup.exe`) 등.
+  구현: `src/company/core/SoulLoader.ts`,
+  `src/main/a2a/envelope.ts`, `src/daemon/StateWriter.ts`,
+  `forge.config.ts`.
+- **SoulLoader fs 가드** — `window.electronAPI.fs` 가 옵셔널인데 가드
+  없이 접근하던 부분으로 strict TS 체크가 깨져 CI 가 레드였던 문제.
+  fs 가 없으면 false 를 반환하도록 정리.
+  구현: `src/company/core/SoulLoader.ts`.
+
+### Changed
+
+- **MCP 워크스페이스 claim** — 9db0b25. 외부 MCP 호출자가 사용자의 active
+  pane 을 hijack 하지 않고 전용 워크스페이스를 점유한다 (`mcp.claimWorkspace`).
+  다중 MCP 클라이언트가 한 wmux 인스턴스에 붙는 시나리오에서 키 입력
+  충돌을 제거한다. 기존 클라이언트는 자동 폴백.
+  구현: `src/mcp/server.ts`, `src/daemon/WorkspaceClaim.ts`.
+- **PTY env filter 일원화** — b19f25a. spawn 직전 env 화이트리스트가
+  여러 곳에 흩어져 있던 것을 한 모듈로 모으고, browser export 경로도
+  같은 sanitizer 를 거치도록 정리해 환경변수 누설 surface 를 줄였다.
+  구현: `src/main/pty/envFilter.ts`,
+  `src/main/browser/exportPaths.ts`.
+
+### Internal
+
+- 릴리스 워크플로우에 winget publishing step 추가 (#5, 825f4ee).
+- README/SEO 정리 — `cmux for Windows` 포지셔닝 강화, 설치 가이드에
+  winget·choco 명령 추가 (0fbbe43, 5f89c0e).
+
+### Migration Notes
+
+스키마 변경 없음. 자동 마이그레이션도 필요 없다. MCP 통합을 사용하는
+외부 클라이언트만 워크스페이스 점유 동작 변화를 확인할 것.
+
 ## [2.7.1] — 2026-04-20 — Constrained Language Mode Hotfix
 
 PowerShell Constrained Language Mode (AppLocker / WDAC가 적용된 회사·학교 PC)

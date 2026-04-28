@@ -1,6 +1,8 @@
 import type { ForgeConfig } from '@electron-forge/shared-types';
 import { MakerSquirrel } from '@electron-forge/maker-squirrel';
 import { MakerZIP } from '@electron-forge/maker-zip';
+import { MakerDeb } from '@electron-forge/maker-deb';
+import { MakerRpm } from '@electron-forge/maker-rpm';
 import { VitePlugin } from '@electron-forge/plugin-vite';
 import { AutoUnpackNativesPlugin } from '@electron-forge/plugin-auto-unpack-natives';
 import { FusesPlugin } from '@electron-forge/plugin-fuses';
@@ -80,33 +82,66 @@ const config: ForgeConfig = {
 
       // 6. Remove .ps1 files from resources — NuGet 2.8 treats PowerShell files
       //    outside the 'tools' folder as errors, breaking Squirrel nupkg creation.
-      const resourcesDir = path.join(outputPath, 'resources');
-      const removePsFiles = (dir: string) => {
-        if (!fs.existsSync(dir)) return;
-        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-          const full = path.join(dir, entry.name);
-          // Preserve .ps1 files in shell-hooks — they are runtime hook scripts, not NuGet tools
-          if (entry.isDirectory()) {
-            if (entry.name === 'shell-hooks') continue;
-            removePsFiles(full);
+      //    Squirrel.Windows is the only maker that builds nupkgs, so this cleanup
+      //    is meaningless on macOS / Linux and skipped there.
+      if (process.platform === 'win32') {
+        const resourcesDir = path.join(outputPath, 'resources');
+        const removePsFiles = (dir: string) => {
+          if (!fs.existsSync(dir)) return;
+          for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+            const full = path.join(dir, entry.name);
+            // Preserve .ps1 files in shell-hooks — they are runtime hook scripts, not NuGet tools
+            if (entry.isDirectory()) {
+              if (entry.name === 'shell-hooks') continue;
+              removePsFiles(full);
+            }
+            else if (entry.name.endsWith('.ps1')) {
+              fs.unlinkSync(full);
+              console.log(`[postPackage] Removed ${path.relative(outputPath, full)}`);
+            }
           }
-          else if (entry.name.endsWith('.ps1')) {
-            fs.unlinkSync(full);
-            console.log(`[postPackage] Removed ${path.relative(outputPath, full)}`);
-          }
-        }
-      };
-      removePsFiles(resourcesDir);
+        };
+        removePsFiles(resourcesDir);
+      }
     },
   },
+  // Makers are filtered by host OS — electron-forge only invokes makers whose
+  // platform matches the runtime, but keeping each one inside an explicit
+  // `process.platform` guard makes the intent obvious and keeps Windows builds
+  // strictly identical to the pre-port behavior. Linux deb/rpm makers and
+  // macOS DMG/notarization land in Phases 2–3.
   makers: [
-    new MakerSquirrel({
-      name: 'wmux',
-      setupExe: SQUIRREL_SETUP_EXE,
-      setupIcon: './assets/icon.ico',
-      iconUrl: 'https://raw.githubusercontent.com/openwong2kim/wmux/main/assets/icon.ico',
-    }),
-    new MakerZIP({}, ['darwin']),
+    ...(process.platform === 'win32'
+      ? [
+          new MakerSquirrel({
+            name: 'wmux',
+            setupExe: SQUIRREL_SETUP_EXE,
+            setupIcon: './assets/icon.ico',
+            iconUrl: 'https://raw.githubusercontent.com/openwong2kim/wmux/main/assets/icon.ico',
+          }),
+        ]
+      : []),
+    ...(process.platform === 'darwin'
+      ? [new MakerZIP({}, ['darwin'])]
+      : []),
+    ...(process.platform === 'linux'
+      ? [
+          new MakerDeb({
+            options: {
+              name: 'wmux',
+              productName: 'wmux',
+              categories: ['Utility', 'Development'],
+            },
+          }),
+          new MakerRpm({
+            options: {
+              name: 'wmux',
+              productName: 'wmux',
+              categories: ['Utility', 'Development'],
+            },
+          }),
+        ]
+      : []),
   ],
   plugins: [
     new AutoUnpackNativesPlugin({}),

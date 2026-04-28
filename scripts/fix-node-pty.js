@@ -1,6 +1,15 @@
 const fs = require('fs');
 const path = require('path');
 
+// winpty.gyp / SpectreMitigation patches only apply to the Windows build of
+// node-pty. On macOS and Linux, node-pty uses forkpty(3) and these gyp files
+// are not part of the build graph, so running the patches is a no-op at best
+// and a stat-fail at worst.
+if (process.platform !== 'win32') {
+  console.log(`Skipping winpty patch on ${process.platform} (Windows-only).`);
+  process.exit(0);
+}
+
 const nodePtyDir = path.join(__dirname, '..', 'node_modules', 'node-pty');
 
 // Patch both winpty.gyp and binding.gyp for bat paths and SpectreMitigation

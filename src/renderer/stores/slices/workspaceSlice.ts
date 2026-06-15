@@ -110,14 +110,27 @@ export const createWorkspaceSlice: StateCreator<StoreState, [['zustand/immer', n
       // covers the user-driven path; this mirrors the same invariant for
       // workspace-level deletion (Sidebar X, Ctrl+Shift+W, SettingsPanel reset)
       // so stale paneIds can't render a phantom ring after their tree is gone.
+      const removedWs = state.workspaces[idx];
       if (state.paneNotificationRing) {
-        const removedWs = state.workspaces[idx];
         const collectLeafIdsFromPane = (p: Pane): string[] =>
           p.type === 'leaf' ? [p.id] : p.children.flatMap(collectLeafIdsFromPane);
         for (const pid of collectLeafIdsFromPane(removedWs.rootPane)) {
           delete state.paneNotificationRing[pid];
         }
       }
+      // Prune ptyId-keyed state (surfaceAgentStatus / terminalBookmarks) for every
+      // terminal surface in the removed workspace, plus the per-workspace
+      // a2aAgentSkills entry — none are otherwise cleaned on workspace deletion,
+      // so they grow unbounded over workspace churn. Guarded for isolated tests.
+      const collectLeafPtyIds = (p: Pane): string[] =>
+        p.type === 'leaf'
+          ? p.surfaces.map((s) => s.ptyId).filter((x): x is string => Boolean(x))
+          : p.children.flatMap(collectLeafPtyIds);
+      for (const ptyId of collectLeafPtyIds(removedWs.rootPane)) {
+        if (state.surfaceAgentStatus) delete state.surfaceAgentStatus[ptyId];
+        if (state.terminalBookmarks) delete state.terminalBookmarks[ptyId];
+      }
+      if (state.a2aAgentSkills) delete state.a2aAgentSkills[id];
       state.workspaces.splice(idx, 1);
       if (state.activeWorkspaceId === id) {
         state.activeWorkspaceId = state.workspaces[Math.min(idx, state.workspaces.length - 1)].id;
@@ -397,9 +410,12 @@ export const createWorkspaceSlice: StateCreator<StoreState, [['zustand/immer', n
       };
       for (const ws of state.workspaces) walkAndClearPtyIds(ws.rootPane);
 
-      // 2. uiSlice fields (cross-slice mutation within the same immer set).
+      // 2. uiSlice + paneSlice fields (cross-slice mutation within the same
+      //    immer set). surfaceAgentStatus is keyed by ptyId, so the blanket
+      //    ptyId reset must wipe it too or stale attention dots survive.
       state.floatingPanePtyId = null;
       state.terminalBookmarks = {};
+      if (state.surfaceAgentStatus) state.surfaceAgentStatus = {};
 
       // 3. companySlice — member.ptyId across all departments.
       if (state.company) {

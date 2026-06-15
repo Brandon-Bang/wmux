@@ -92,6 +92,17 @@ export const createSurfaceSlice: StateCreator<StoreState, [['zustand/immer', nev
     const idx = pane.surfaces.findIndex((s) => s.id === surfaceId);
     if (idx === -1) return;
 
+    // Prune ptyId-keyed renderer state for the closed terminal surface so the
+    // surfaceAgentStatus / terminalBookmarks maps don't grow unbounded across
+    // open/close churn (ptyIds are unique and never reused). No-op for
+    // browser/editor surfaces (empty ptyId). Guarded for isolated-slice tests,
+    // mirroring the paneNotificationRing cross-slice prune in workspaceSlice.
+    const closedPtyId = pane.surfaces[idx].ptyId;
+    if (closedPtyId) {
+      if (state.surfaceAgentStatus) delete state.surfaceAgentStatus[closedPtyId];
+      if (state.terminalBookmarks) delete state.terminalBookmarks[closedPtyId];
+    }
+
     pane.surfaces.splice(idx, 1);
     if (pane.activeSurfaceId === surfaceId) {
       pane.activeSurfaceId = pane.surfaces[Math.min(idx, pane.surfaces.length - 1)]?.id || '';

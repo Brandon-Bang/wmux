@@ -116,6 +116,48 @@ function writePidMap(pid: string | number, ptyId: string): void {
   } catch { /* best-effort */ }
 }
 
+/** Unlink a PID → ptyId mapping. Best-effort; missing file is fine. */
+function removePidMap(pid: string | number): void {
+  try {
+    fs.unlinkSync(path.join(getPidMapDir(), String(pid)));
+  } catch { /* already gone / best-effort */ }
+}
+
+/**
+ * One-time sweep of ~/.wmux/pid-map at startup: unlink every entry whose PID is
+ * no longer alive (and any malformed filename). The daemon-mode dispose/death
+ * paths and the local PTYManager.remove() path could each leak a pid-map file
+ * (self-exiting shells, crash-orphaned entries), so over weeks the directory
+ * grows unbounded — and `a2a.resolve.identity` readdirs the WHOLE dir + does a
+ * renderer round-trip per non-stale entry on every MCP identity lookup, so a
+ * bloated dir degrades identity-resolution latency. A dead-PID sweep bounds it
+ * and reaps entries no per-session unlink can ever reach. Runs once per process.
+ */
+let pidMapSwept = false;
+function sweepDeadPidMapEntries(): void {
+  if (pidMapSwept) return;
+  pidMapSwept = true;
+  try {
+    const dir = getPidMapDir();
+    if (!fs.existsSync(dir)) return;
+    for (const name of fs.readdirSync(dir)) {
+      const filePid = parseInt(name, 10);
+      if (!Number.isInteger(filePid) || filePid <= 0 || String(filePid) !== name) {
+        removePidMap(name); // malformed filename — not a live-PID anchor
+        continue;
+      }
+      let alive = true;
+      try {
+        process.kill(filePid, 0); // signal 0 = existence probe (cross-platform)
+      } catch (err) {
+        // ESRCH = no such process → dead. EPERM = exists but unsignalable → alive.
+        if ((err as NodeJS.ErrnoException).code === 'ESRCH') alive = false;
+      }
+      if (!alive) removePidMap(filePid);
+    }
+  } catch { /* best-effort */ }
+}
+
 export function registerPTYHandlers(
   ptyManager: PTYManager,
   ptyBridge: PTYBridge,
@@ -123,6 +165,15 @@ export function registerPTYHandlers(
   getWindow?: () => BrowserWindow | null,
 ): () => void {
   const useDaemon = daemonClient?.isConnected ?? false;
+
+  // Reap pid-map entries left behind by self-exiting shells / crashed sessions
+  // before any new session writes its own (runs once per process).
+  sweepDeadPidMapEntries();
+
+  // Track the shell PID behind each daemon session so the dispose / death paths
+  // can unlink its ~/.wmux/pid-map/<pid> file — without this the pid-map grows
+  // unbounded over a long daemon connection (see writePidMap doc + #102 class).
+  const sessionShellPids = new Map<string, number>();
 
   // Track daemon session:data listeners by sessionId so PTY_CREATE / PTY_RECONNECT
   // can be idempotent. Without per-id tracking, every reconcile (mount + each
@@ -271,6 +322,7 @@ export function registerPTYHandlers(
       const shellPid = (result as { pid?: number })?.pid;
       if (shellPid) {
         writePidMap(shellPid, sessionId);
+        sessionShellPids.set(sessionId, shellPid);
       }
 
       return { id: sessionId, shell, cwd: effectiveCwd };
@@ -457,6 +509,12 @@ export function registerPTYHandlers(
       // Drop the data forwarding listener for this session so a future
       // create or reconnect doesn't pile new listeners on top of dead ones.
       clearSessionDataListener(id);
+      // Unlink the pid-map anchor for this session's shell PID.
+      const disposedPid = sessionShellPids.get(id);
+      if (disposedPid !== undefined) {
+        removePidMap(disposedPid);
+        sessionShellPids.delete(id);
+      }
     }));
   } else {
     ipcMain.handle(IPC.PTY_DISPOSE, wrapHandler(IPC.PTY_DISPOSE, (_event: Electron.IpcMainInvokeEvent, id: string) => {
@@ -535,6 +593,7 @@ export function registerPTYHandlers(
         // a2a.resolve.identity.
         if (typeof session.pid === 'number' && session.pid > 0) {
           writePidMap(session.pid, id);
+          sessionShellPids.set(id, session.pid);
         }
 
         // Set up data forwarding. Routed through the per-id helper so a
@@ -582,6 +641,19 @@ export function registerPTYHandlers(
         win.webContents.send(IPC.PTY_EXIT, payload.sessionId, payload.exitCode ?? -1);
       }
       daemonClient.disconnectSessionPipe(payload.sessionId).catch(() => {});
+      // A naturally-dying session (user typed `exit`, agent CLI finished, crash)
+      // must release the same per-session resources the explicit pty:dispose path
+      // does — otherwise the 'session:data' listener, its StringDecoder, the
+      // listener Map entry, and the pid-map file leak for the daemon-connection
+      // lifetime (MaxListenersExceededWarning under agent churn). The renderer's
+      // onExit only writes an "exited" banner; it never calls pty.dispose.
+      clearSessionDataListener(payload.sessionId);
+      sessionDecoders.delete(payload.sessionId);
+      const diedPid = sessionShellPids.get(payload.sessionId);
+      if (diedPid !== undefined) {
+        removePidMap(diedPid);
+        sessionShellPids.delete(payload.sessionId);
+      }
     };
     daemonClient.on('session:died', onDaemonSessionDied);
   }
@@ -601,6 +673,8 @@ export function registerPTYHandlers(
         daemonClient.removeListener('session:data', listener);
       }
       daemonSessionListeners.clear();
+      sessionDecoders.clear();
+      sessionShellPids.clear();
       if (onDaemonSessionDied) {
         daemonClient.removeListener('session:died', onDaemonSessionDied);
       }

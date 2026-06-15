@@ -130,6 +130,10 @@ export const createCompanySlice: StateCreator<StoreState, [['zustand/immer', nev
     state.sessionStartTime = null;
     state.messageQueue = [];
     state.approvalQueue = [];
+    // Member-keyed bookkeeping must also reset or it survives company teardown.
+    state.memberInbox = {};
+    state.taskHistory = {};
+    state.waitGraph = {};
   }),
 
   // ─── Department ──────────────────────────────────────────────────────────
@@ -161,6 +165,12 @@ export const createCompanySlice: StateCreator<StoreState, [['zustand/immer', nev
     if (!state.company) return;
     const dept = state.company.departments.find((d) => d.id === deptId);
     if (!dept) return;
+    // Prune member-keyed bookkeeping for every member of the removed department.
+    for (const m of dept.members) {
+      delete state.memberInbox[m.id];
+      delete state.memberCosts[m.id];
+      delete state.waitGraph[m.id];
+    }
     // Remove workspaces linked to this department's members
     const memberWsIds = new Set(dept.members.map((m) => m.workspaceId).filter(Boolean));
     state.workspaces = state.workspaces.filter((ws) => !memberWsIds.has(ws.id));
@@ -199,6 +209,10 @@ export const createCompanySlice: StateCreator<StoreState, [['zustand/immer', nev
     if (idx !== -1) {
       dept.members.splice(idx, 1);
     }
+    // Prune member-keyed bookkeeping so it doesn't outlive the member.
+    delete state.memberInbox[memberId];
+    delete state.memberCosts[memberId];
+    delete state.waitGraph[memberId];
   }),
 
   updateMemberStatus: (memberId, status, lastMessage) => set((state) => {

@@ -380,6 +380,12 @@ export class DaemonNotificationRouter {
         this.lastAgentEventAt.delete(payload.sessionId);
         this.lastAgentNameByPty.delete(payload.sessionId);
         clearSuppression(payload.sessionId);
+        // Prune the HookSignalRouter ledger for this dead ptyId. In LOCAL mode
+        // PTYBridge.cleanupInstance calls dropPty; in DAEMON mode (the default
+        // production path) nothing did, so ledger entries keyed by dead ptyIds
+        // accumulated for the whole daemon-connection lifetime. This restores
+        // parity so the ledger can't grow unbounded under agent churn.
+        this.getHookRouter?.()?.dropPty(payload.sessionId);
       } catch (err) {
         console.warn('[DaemonNotificationRouter] session end error:', err);
       }

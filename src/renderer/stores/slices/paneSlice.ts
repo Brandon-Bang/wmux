@@ -210,7 +210,20 @@ export const createPaneSlice: StateCreator<StoreState, [['zustand/immer', never]
       if (idx === -1) return;
 
       const previousActiveId = ws.activePaneId;
+      const removedPane = parent.children[idx];
       parent.children.splice(idx, 1);
+
+      // Prune ptyId-keyed state for every terminal surface in the closed subtree.
+      // surfaceAgentStatus / terminalBookmarks are keyed by the unique,
+      // never-reused ptyId, so without this they grow unbounded across
+      // split/close churn. Guarded for isolated-slice tests.
+      for (const leaf of getLeafPanes(removedPane)) {
+        for (const surface of leaf.surfaces) {
+          if (!surface.ptyId) continue;
+          if (state.surfaceAgentStatus) delete state.surfaceAgentStatus[surface.ptyId];
+          if (state.terminalBookmarks) delete state.terminalBookmarks[surface.ptyId];
+        }
+      }
 
       if (parent.children.length === 1) {
         // Collapse: replace parent with the remaining child

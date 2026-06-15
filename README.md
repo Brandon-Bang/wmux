@@ -254,6 +254,17 @@ npm run make       # Build installer
 
 The `install.ps1` script auto-installs Python and VS Build Tools if missing **only when building from source** (`-FromSource` / `WMUX_FROM_SOURCE=1`). The default one-liner downloads the prebuilt Setup.exe and needs none of these.
 
+### Building on Windows — troubleshooting
+
+Two environment quirks can break `npm start` / `npm run make`:
+
+- **`node-gyp failed to rebuild node-pty … Could not find any Visual Studio`** even though VS Build Tools + the C++ workload are installed. `@electron/node-gyp`'s VS auto-detection can fail when the VS Setup COM is unregistered (`REGDB_E_CLASSNOTREG`). Build from a **"Developer PowerShell/Command Prompt for VS 2022"** (it sets `VCINSTALLDIR`, which node-gyp uses directly), or re-register the COM once in an **elevated** PowerShell:
+  ```powershell
+  regsvr32 /s "C:\ProgramData\Microsoft\VisualStudio\Setup\x64\Microsoft.VisualStudio.Setup.Configuration.Native.dll"
+  ```
+  (node-pty ships N-API prebuilds that load under Electron without a rebuild, so this only affects electron-forge's rebuild step.)
+- **`npm run make` fails at Squirrel releasify** (`Failed to extract … .nupkg`, *file not found*). electron-winstaller ships `7z-x64.exe` but the Squirrel releasify step hardcodes `7z.exe`. The `postinstall` (`scripts/fix-node-pty.js`) copies `7z-<arch>.exe`/`.dll` → `7z.exe`/`7z.dll` in the electron-winstaller vendor dir, so this is fixed automatically after `npm install`.
+
 ---
 
 ## Architecture

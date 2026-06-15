@@ -57,3 +57,32 @@ for (const gypPath of gypFiles) {
 if (totalPatched === 0) {
   console.log('node-pty gyp files already patched or not found.');
 }
+
+// ── electron-winstaller / Squirrel: provide the unsuffixed 7z.exe ───────────
+// electron-winstaller 5.x ships 7z arch-suffixed (7z-x64.exe / 7z-arm64.exe),
+// but the Squirrel releasify step it invokes hardcodes the unsuffixed `7z.exe`
+// (+ 7z.dll). Without these, `npm run make` fails at releasify with
+// "Failed to extract … .nupkg … 지정된 파일을 찾을 수 없습니다" (Process.Start: file
+// not found). Provide the copies so releasify finds them. Idempotent and
+// best-effort: skips when the source is absent (electron-winstaller not
+// installed, or a future version already ships a plain 7z.exe) or the target
+// already exists.
+const winstallerVendor = path.join(
+  __dirname, '..', 'node_modules', 'electron-winstaller', 'vendor',
+);
+const winstallerArch = process.arch === 'arm64' ? 'arm64' : 'x64';
+for (const [src, dest] of [
+  [`7z-${winstallerArch}.exe`, '7z.exe'],
+  [`7z-${winstallerArch}.dll`, '7z.dll'],
+]) {
+  const srcPath = path.join(winstallerVendor, src);
+  const destPath = path.join(winstallerVendor, dest);
+  try {
+    if (fs.existsSync(srcPath) && !fs.existsSync(destPath)) {
+      fs.copyFileSync(srcPath, destPath);
+      console.log(`Provided ${dest} for Squirrel releasify (copied from ${src}).`);
+    }
+  } catch (err) {
+    console.log(`Could not provide ${dest}: ${err.message}`);
+  }
+}

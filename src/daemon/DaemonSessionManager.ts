@@ -9,6 +9,7 @@ import { PromptEventLog } from './PromptEventLog';
 import { buildSpawnInjection } from './shell-integration';
 import { buildSafeChildEnv } from '../shared/envFilter';
 import { isMac } from '../shared/platform';
+import { killProcessTree } from '../shared/killProcessTree';
 import { createDefaultConfig } from './config';
 
 const DEFAULT_COLS = 80;
@@ -308,6 +309,14 @@ export class DaemonSessionManager extends EventEmitter {
     if (!managed) return;
 
     managed.bridge.cleanup();
+    // Windows: reap the FULL PTY descendant tree (powershell -> claude.exe ->
+    // node/bun MCP) BEFORE node-pty's ConPTY kill closes the shell. node-pty
+    // 1.1.0 kill() does not walk descendants, so without this the grandchildren
+    // orphan ("claude still alive in memory") AND the leftover conhost handles
+    // keep the daemon's own process.exit() from finalizing (the undead ~124 MB
+    // daemon zombie). Run the tree-kill first, while parent -> child links are
+    // still intact for taskkill /T to enumerate; no-op on non-Windows.
+    killProcessTree(managed.ptyProcess.pid);
     try {
       managed.ptyProcess.kill();
     } catch {

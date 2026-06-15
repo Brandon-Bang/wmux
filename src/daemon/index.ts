@@ -12,6 +12,7 @@ import { selectRecoverableSessions } from './recoverySelector';
 import { createSnapshotRunner } from './snapshotRunner';
 import { RingBuffer } from './RingBuffer';
 import { initDaemonLogSink } from './util/logSink';
+import { hardExit } from './hardExit';
 import type { DaemonState } from './types';
 import type { DaemonEvent, DaemonCreateSessionParams, DaemonSessionIdParams, DaemonResizeParams } from '../shared/rpc';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
@@ -835,8 +836,8 @@ function registerRpcHandlers(
     // fires and guarantees the process dies even when stop() hangs.
     setImmediate(() => {
       const forceExit = setTimeout(() => {
-        log('warn', 'daemon.shutdown: pipeServer.stop() did not finalize in 1s — forcing process.exit(0)');
-        process.exit(0);
+        log('warn', 'daemon.shutdown: pipeServer.stop() did not finalize in 1s — forcing hard exit');
+        hardExit(0);
       }, 1000);
       // Delay stop()+exit by a tick so the `{status:'ok'}` ack flushes to the
       // caller's socket FIRST. pipeServer.stop() destroys every connected
@@ -849,7 +850,7 @@ function registerRpcHandlers(
       setTimeout(() => {
         void pipeServer.stop().catch(() => { /* best effort */ }).finally(() => {
           clearTimeout(forceExit);
-          process.exit(0);
+          hardExit(0);
         });
       }, 50);
     });

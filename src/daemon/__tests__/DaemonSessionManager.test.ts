@@ -68,9 +68,17 @@ vi.mock('node-pty', () => ({
   },
 }));
 
+// Mock the Windows tree-kill helper so destroySession's process-tree reap is
+// observable here without shelling out to a real `taskkill` against the mocked
+// PTY's fake PID (12345).
+vi.mock('../../shared/killProcessTree', () => ({
+  killProcessTree: vi.fn(() => true),
+}));
+
 // Import after mock is set up
 import { DaemonSessionManager } from '../DaemonSessionManager';
 import { createDefaultConfig } from '../config';
+import { killProcessTree } from '../../shared/killProcessTree';
 
 describe('DaemonSessionManager', () => {
   let manager: DaemonSessionManager;
@@ -78,6 +86,7 @@ describe('DaemonSessionManager', () => {
   beforeEach(() => {
     manager = new DaemonSessionManager();
     lastMockPty = null;
+    vi.mocked(killProcessTree).mockClear();
   });
 
   afterEach(() => {
@@ -117,6 +126,31 @@ describe('DaemonSessionManager', () => {
     manager.createSession({ id: 'dup', cmd: 'cmd.exe', cwd: '.' });
     expect(() => manager.createSession({ id: 'dup', cmd: 'cmd.exe', cwd: '.' }))
       .toThrow("Session 'dup' already exists");
+  });
+
+  // Windows orphan fix: destroySession must reap the whole PTY descendant tree
+  // (powershell -> claude.exe -> MCP) via killProcessTree BEFORE node-pty's
+  // kill, so grandchildren don't orphan and conhost handles release.
+  it('reaps the PTY process tree before killing the pane on destroy', () => {
+    manager.createSession({ id: 'tree-1', cmd: 'cmd.exe', cwd: '.' });
+    const pty = lastMockPty;
+    if (!pty) throw new Error('test setup: tree-1 PTY not created');
+
+    manager.destroySession('tree-1');
+
+    expect(vi.mocked(killProcessTree)).toHaveBeenCalledWith(pty.pid);
+    expect(pty.killed).toBe(true);
+  });
+
+  it('reaps every session tree on disposeAll', () => {
+    manager.createSession({ id: 'da-1', cmd: 'cmd.exe', cwd: '.' });
+    manager.createSession({ id: 'da-2', cmd: 'cmd.exe', cwd: '.' });
+
+    manager.disposeAll();
+
+    // One tree-kill per session (both share the mocked pid 12345).
+    expect(vi.mocked(killProcessTree)).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(killProcessTree)).toHaveBeenCalledWith(12345);
   });
 
   // 2. listSessions → returns created sessions

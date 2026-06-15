@@ -1,6 +1,17 @@
 # Plan: Duplicate-daemon / split-brain on "Quit (keep sessions)" → relaunch (P1)
 
 ## Status
+**SHIPPED (STALE DOC).** Defects 1–3 below were all implemented in #93 (v2.16.2):
+`launcher.ts` 3-state `checkProcessLiveness`, `tryEscalatedReping`, and the
+`DAEMON_EXIT_ALREADY_RUNNING` yield/reconnect. This document is retained for history
+only. The DISTINCT orphan-daemon "zombie" leak (clean shutdown that calls
+`process.exit(0)` but never terminates because node-pty leaves ConPTY/conhost handles
+open) is tracked separately in `plans/RCA-orphan-daemon-zombie-2026-06-15.md`.
+
+---
+
+_Original (historical) framing below:_
+
 Design / plan-level. **No code changed.** High-risk daemon-lifecycle area
 (issue #54 required 5 rounds of codex hardening). This doc grounds the fix in
 the real code so a future session can implement it behind iterative codex

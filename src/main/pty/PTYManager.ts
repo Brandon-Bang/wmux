@@ -5,6 +5,7 @@ import path from 'node:path';
 import { getPipeName, ENV_KEYS, getPidMapDir } from '../../shared/constants';
 import { buildSafeChildEnv } from '../../shared/envFilter';
 import { isWindows } from '../../shared/platform';
+import { killProcessTree } from '../../shared/killProcessTree';
 
 export type ShellType = 'powershell' | 'bash' | 'cmd' | 'unknown';
 
@@ -223,6 +224,10 @@ export class PTYManager {
     const instance = this.instances.get(id);
     if (instance) {
       this.removePidMap(instance.process.pid);
+      // Windows: reap the full PTY descendant tree before node-pty's ConPTY
+      // kill closes the shell — node-pty 1.1.0 leaves the powershell -> claude
+      // -> MCP grandchildren orphaned otherwise. No-op on non-Windows.
+      killProcessTree(instance.process.pid);
       try { instance.process.kill(); } catch { /* already dead */ }
       this.onDisposeCallback?.(id);
       this.instances.delete(id);

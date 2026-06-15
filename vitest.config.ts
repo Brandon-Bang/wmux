@@ -15,5 +15,10 @@ export default defineConfig({
       'integrations/**/__tests__/**/*.test.{ts,tsx}',
     ],
     environment: 'node',
+    // Unit tests drive destroySession/dispose with mocked PTYs carrying fake
+    // PIDs (e.g. 12345). killProcessTree must NOT shell out to a real
+    // `taskkill /F` against those PIDs, so disable the Windows tree-kill for
+    // the whole unit suite. Wiring is asserted separately by mocking the helper.
+    env: { WMUX_DISABLE_TREE_KILL: '1' },
   },
 });

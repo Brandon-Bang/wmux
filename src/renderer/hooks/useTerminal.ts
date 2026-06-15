@@ -39,6 +39,14 @@ let webglTokenSeq = 0;
 // Chromium's ~16 cap); this timer is only the no-pressure cleanup.
 export const WEBGL_HIDDEN_DISPOSE_DELAY_MS = 10_000;
 
+// Max animation frames the on-reveal re-fit will retry while the renderer is
+// not yet measured (proposeDimensions() returns 0-size for a just-acquired
+// WebGL context) or a selection is held. ~10 frames ≈ 160ms — ample for the
+// renderer to measure its cell size; after that the active-workspace
+// ResizeObserver catches any later genuine size change. Bounds the retry so it
+// can never spin.
+export const REVEAL_FIT_MAX_FRAMES = 10;
+
 // RCA A1 — reconnect-with-retry policy lives in its own module so it can be
 // unit-tested without xterm/zustand/electron. Bound to the live deps here.
 function reconnectPtyWithRetry(ptyId: string, isCurrent: () => boolean): Promise<void> {
@@ -1078,20 +1086,42 @@ export function useTerminal(containerRef: React.RefObject<HTMLDivElement | null>
       if (loadWebglRef.current && disposeWebglRef.current) {
         webglContextPool.acquire(token, loadWebglRef.current, disposeWebglRef.current);
       }
-      // Defer fit to allow CSS display change to take effect before measuring.
-      // Selection-preservation guard — workspace/tab switch then immediate
-      // selection + Ctrl+C used to wipe the selection because this fit had
-      // no guard (unlike ResizeObserver and font/theme paths). The next
-      // ResizeObserver tick (after selection is released) handles the
-      // deferred resize naturally.
-      const id = requestAnimationFrame(() => {
-        if (!shouldFitWhilePreservingSelection(terminalRef.current)) {
-          console.debug('[Terminal] visibility fit skipped — active selection');
+      // Re-fit on reveal. A workspace hidden during an OS-window resize never
+      // saw a ResizeObserver tick (observers don't fire for display:none
+      // subtrees), so this is the ONLY chance to reconcile its terminal to the
+      // new container width. A single rAF fit() was fragile: it silently no-ops
+      // when the just-(re)acquired WebGL renderer hasn't measured its cell size
+      // yet (FitAddon.proposeDimensions() returns undefined / 0-size) or while a
+      // selection is held — leaving the terminal pinned at its stale, narrower
+      // column count with empty background to the right ("workspace width stuck
+      // smaller than the window"). Retry across a few frames until the renderer
+      // is measured and no selection blocks the fit, then apply EXACTLY ONCE.
+      // The readiness probe (proposeDimensions) sends no resize, so this never
+      // adds RPCs beyond the single fit() — staying clear of the daemon's
+      // 50-RPC/s per-socket cap even when many panes reveal at once.
+      let frames = 0;
+      let rafId = requestAnimationFrame(function attemptRevealFit() {
+        const term = terminalRef.current;
+        const fitAddon = fitAddonRef.current;
+        const container = containerRef.current;
+        if (!term || !fitAddon || !container) return; // unmounted — stop
+        const dims = container.offsetWidth > 0 && container.offsetHeight > 0
+          ? fitAddon.proposeDimensions()
+          : undefined;
+        const measured =
+          !!dims && Number.isFinite(dims.cols) && Number.isFinite(dims.rows) &&
+          dims.cols > 0 && dims.rows > 0;
+        if (measured && shouldFitWhilePreservingSelection(term)) {
+          fit(); // renderer measured + no active selection → apply once
           return;
         }
-        fit();
+        // Not ready (renderer unmeasured, container hidden, or selection held):
+        // reschedule instead of silently dropping, bounded so it can't spin.
+        if (++frames < REVEAL_FIT_MAX_FRAMES) {
+          rafId = requestAnimationFrame(attemptRevealFit);
+        }
       });
-      return () => cancelAnimationFrame(id);
+      return () => cancelAnimationFrame(rafId);
     } else {
       // DEFER the pool release rather than freeing the instant the terminal is
       // hidden (see WEBGL_HIDDEN_DISPOSE_DELAY_MS). A hidden terminal usually

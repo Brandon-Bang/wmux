@@ -319,6 +319,15 @@ async function recoverSessions(
       'warn',
       `Recovery cap: ${recoverableIds.size + cappedCount} eligible sessions, recovering ${recoverableIds.size} most recent. ${cappedCount} kept suspended for next launch (or pruned by 7-day TTL).`,
     );
+    // Forensics (2026-06-18 RCA): a cap-skipped pane stays suspended and never
+    // reattaches this launch — a second, distinct way an agent pane (e.g.
+    // "Jarvis") can "come back as nothing" (symptom 4), separate from the
+    // shell-only re-spawn below. Naming the skipped ids lets a recurrence
+    // attribute a lost pane to cap-eviction vs shell-respawn.
+    const cappedSkipped = state.sessions
+      .filter((s) => s.state !== 'dead' && !recoverableIds.has(s.id))
+      .map((s) => `${s.id}${s.agent ? '(agent)' : ''}`);
+    log('warn', `[recovery.cap] skipped ids=${cappedSkipped.join(',')}`);
   }
 
   for (const session of state.sessions) {
@@ -326,6 +335,17 @@ async function recoverSessions(
     // Cap-skipped: leave session untouched in state.sessions. It will be
     // re-evaluated on the next launch.
     if (!recoverableIds.has(session.id)) continue;
+
+    // Forensics (2026-06-18 RCA): recovery is process-RESTART, not reattach —
+    // createSession (below) re-runs session.cmd (the SHELL); the program that
+    // was running inside the pane (e.g. claude / "Jarvis") is NOT relaunched.
+    // After any real daemon death this is why a restored pane shows a fresh
+    // PowerShell prompt (symptom 2) and a long-running agent never returns
+    // (symptom 4). `agent` is an A2A identity, not a launch command.
+    log(
+      'info',
+      `[recovery] re-spawn id=${session.id} cmd=${session.cmd} agent=${session.agent ? 'set' : 'none'} state=${session.state} — SHELL only; in-PTY program (e.g. claude) is NOT relaunched`,
+    );
 
     if (session.state === 'suspended' && session.bufferDumpPath) {
       // Attempt to recover suspended session
@@ -1173,8 +1193,16 @@ async function shutdown(
   if (opts.skipExit) {
     // Caller (RPC handler) will fire setImmediate(() => process.exit(0))
     // after returning so the ack flushes back to the client first.
+    log('info', `[shutdown.exit] deferring final exit to caller (skipExit; daemon.shutdown RPC path uses hardExit) pid=${process.pid}`);
     return;
   }
+  // Forensics (2026-06-18 RCA): this path (SIGTERM/SIGINT/idle/uncaughtException)
+  // exits via plain process.exit(0) — NOT hardExit. process.exit(0) can wedge on
+  // retained ConPTY/conhost handles, leaving an undead "zombie" daemon. The
+  // disposeAll above already tree-killed the PTYs on this path, so a wedge here
+  // strands the DAEMON (not the grandchildren). If this is the LAST line for
+  // this pid in the log and the process is still alive, the exit wedged.
+  log('warn', `[shutdown.exit] calling process.exit(0) pid=${process.pid} (NOT hardExit; may wedge on retained ConPTY handles → orphan-daemon zombie)`);
   process.exit(0);
 }
 
@@ -1261,6 +1289,17 @@ async function main(): Promise<void> {
   // instead of destroying it (codex #4).
   const maxRecover = Math.min(config.session.maxSessions, MAX_RECOVER_SESSIONS);
   await recoverSessions(stateWriter, sessionManager, processMonitor, maxRecover);
+
+  // Forensics (2026-06-18 RCA): an unambiguous per-generation boot marker.
+  // A plain renderer "Reload" (Ctrl+R) does NOT re-run recovery — only a real
+  // daemon (re)boot does. So when a recurrence shows panes coming back as
+  // fresh shells (symptom 2), correlate this line's pid+timestamp against the
+  // renderer reload to tell "reattached to the SAME daemon" from "a respawned
+  // daemon recovered shell-only sessions".
+  log(
+    'info',
+    `[boot] daemon generation pid=${process.pid} bootId=${cachedBootId ?? '?'} recoveredLiveSessions=${sessionManager.listSessions().length}`,
+  );
 
   // 5. Register RPC handlers
   registerRpcHandlers(

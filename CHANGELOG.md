@@ -5,6 +5,18 @@ All notable changes to wmux are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — crash-forensics instrumentation for the recurring mass-pane-death incident
+
+On 2026-06-17 the daemon-crash failure class recurred despite the v2.14–v2.16 fixes: every pane showed `[Process exited with code -1]` and died, the menu **Reload** brought every pane back as a fresh PowerShell instead of the Claude Code / Cursor that had been running, Task Manager filled with dozens of orphaned `node`/`Claude Code` processes, and "Jarvis" (a long-running agent driven over an external Telegram relay) died and never came back. A multi-agent RCA (root-caused, then adversarially verified) is written up in [`plans/RCA-recurring-crash-forensics-2026-06-18.md`](plans/RCA-recurring-crash-forensics-2026-06-18.md). The bug is **not currently reproducible**, so — per the prior RCA's "observability first, then confirm the trigger from logs" policy — this change ships **diagnostics only** (no behavior change); the code fixes are tracked in §6 of the RCA for a later, one-per-PR rollout.
+
+### Diagnostics
+- **`-1` is now provably attributable.** A `[lifecycle] session:died→render` line at the main↔renderer boundary records `rawExitCode` vs the fabricated `willRender=-1` (`-1` is `payload.exitCode ?? -1`, not a real code — ConPTY reports `null` for any killed shell) plus a millisecond timestamp, so a recurrence shows whether every pane died in the same tick (a daemon-wide mass-kill) or one at a time.
+- **The orphan source is now named.** The two launcher daemon-kill sites (`ensureDaemon` respawn + `killDaemonByPidFile` backstop) log `[launcher] SIGKILL daemon PID … WITHOUT tree-kill` — these bare `SIGKILL`s reap only the daemon PID, stranding the `powershell→claude→node-MCP` subtree (no `killProcessTree` wired here, no Job Object tether). And `killProcessTree` itself now logs `[killProcessTree] reaped tree` / `taskkill failed status=…` instead of swallowing the result, so a recurrence can tell "tree-kill never ran" (abrupt path) from "ran but failed" (AV/permission) — opposite root causes.
+- **Shell-only recovery is now visible.** `recoverSessions` logs `[recovery] re-spawn … SHELL only` per session (recovery restarts `session.cmd`, the shell — the in-PTY program like claude is never relaunched), `[recovery.cap] skipped ids=` names cap-evicted panes (a second way an agent pane is lost), and a `[boot] daemon generation pid= bootId=` marker makes daemon generations unambiguous so a Reload that yields fresh shells can be pinned to a daemon respawn vs a same-daemon reattach.
+- **The zombie-daemon wedge is now flagged.** `shutdown()` logs `[shutdown.exit] calling process.exit(0)` (the SIGTERM/SIGINT/idle/uncaught path that is *not* routed through `hardExit`); if that is the last line for a pid still alive, the exit wedged on retained ConPTY handles.
+
+All markers land in the existing per-process sinks (`~/.wmux/logs/daemon-*.log`, `%APPDATA%/wmux/logs/main-*.log`; crash-durable, 14-day prune) and are locked by `src/daemon/__tests__/crashForensicsInstrumentation.test.ts` so a refactor can't silently drop them. The RCA's §7 is a grep-by-marker checklist for the next recurrence.
+
 ## [2.16.2] — 2026-06-03 — daemon hardening: security, split-brain fix, configurable lifecycle
 
 Bundles everything merged since v2.16.1: a token-file permission hardening (security), the duplicate-daemon / split-brain fix behind the "relaunch resets my terminals" bug, configurable daemon lifecycle thresholds, and idle-reap diagnostics. No config changes are required — defaults are unchanged.

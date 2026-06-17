@@ -49,10 +49,22 @@ export function killProcessTree(
       windowsHide: true,
       stdio: 'ignore',
     });
-  } catch {
-    // taskkill exits 128 when the PID is already gone; any failure here is
-    // benign — the caller's ptyProcess.kill() / ClosePseudoConsole is the
-    // backstop, and an orphan is the worse outcome than a no-op.
+    // Forensics (2026-06-18 RCA): a fully-swallowed taskkill result made it
+    // impossible, on the next recurrence, to tell "tree-kill never ran" (an
+    // abrupt SIGKILL/TerminateProcess path that skips this helper entirely)
+    // from "tree-kill ran but failed" (AV/permission blocked taskkill) — two
+    // root causes with opposite fixes. Written via stderr so it is captured by
+    // the stdout/stderr tee in BOTH the main and daemon logSink.
+    try { process.stderr.write(`[${new Date().toISOString()}] [info] [killProcessTree] reaped tree pid=${pid} (taskkill /T /F ok)\n`); } catch { /* ignore */ }
+  } catch (err) {
+    // taskkill exits 128 when the PID is already gone; that failure is benign —
+    // the caller's ptyProcess.kill() / ClosePseudoConsole is the backstop, and
+    // an orphan is the worse outcome than a no-op. A non-128 status
+    // (EPERM/AV-blocked) means the descendant tree may have survived.
+    const status = (err as { status?: number; code?: string } | undefined)?.status
+      ?? (err as { code?: string } | undefined)?.code ?? 'unknown';
+    const level = status === 128 ? 'info' : 'warn';
+    try { process.stderr.write(`[${new Date().toISOString()}] [${level}] [killProcessTree] taskkill failed pid=${pid} status=${status} — descendant PTY tree may be ORPHANED\n`); } catch { /* ignore */ }
   }
   return true;
 }

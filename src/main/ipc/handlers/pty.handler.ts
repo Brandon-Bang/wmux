@@ -637,6 +637,16 @@ export function registerPTYHandlers(
   if (useDaemon && daemonClient) {
     onDaemonSessionDied = (payload: { sessionId: string; exitCode: number | null }) => {
       const win = getWindow?.();
+      // Forensics (2026-06-18 RCA): the "-1" the user sees is a FABRICATED
+      // sentinel — `exitCode ?? -1` — not a real exit code. ConPTY reports null
+      // for any killed shell. Logging rawExitCode vs willRender at this main↔
+      // renderer boundary (a) proves the broadcast actually arrived (vs a
+      // dropped socket → blank pane), and (b) same-millisecond timestamps
+      // across many ids reveal the all-panes-at-once cascade (daemon mass-death)
+      // vs an isolated pane death. Cross-reference the daemon `[lifecycle]
+      // session:died` line (which carries reason/signal) by id+timestamp.
+      // eslint-disable-next-line no-console
+      console.log(`[lifecycle] session:died→render id=${payload.sessionId} rawExitCode=${payload.exitCode ?? 'null'} willRender=${payload.exitCode ?? -1} ts=${Date.now()}`);
       if (win && !win.isDestroyed()) {
         win.webContents.send(IPC.PTY_EXIT, payload.sessionId, payload.exitCode ?? -1);
       }

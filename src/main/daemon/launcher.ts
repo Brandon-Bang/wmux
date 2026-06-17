@@ -637,6 +637,15 @@ export async function ensureDaemon(): Promise<DaemonInfo> {
               `[launcher] PID ${existingPid} verified wmux daemon (image+cmdline) but unresponsive${token ? ' after escalated re-ping' : ' (no auth token to ping)'} — terminating before respawn`,
             );
             let killSucceeded = true;
+            // Forensics (2026-06-18 RCA): this SIGKILLs the daemon but does NOT
+            // tree-kill its PTYs (killProcessTree is not wired into launcher.ts)
+            // and the PTYs have no Job Object tether — so every
+            // powershell→claude→node-MCP subtree is reparented to the OS and
+            // ORPHANED. This is the primary source of the "dozens of orphaned
+            // node/Claude processes" pile-up; log each such kill.
+            console.warn(
+              `[launcher] SIGKILL daemon PID ${existingPid} WITHOUT tree-kill — descendant PTY subtrees (powershell→claude→node) will be orphaned (no killProcessTree at this site, no Job Object)`,
+            );
             try {
               process.kill(existingPid, 'SIGKILL');
             } catch (err: unknown) {
@@ -779,6 +788,12 @@ export function killDaemonByPidFile(): boolean {
       return false; // definitive: same image but not our daemon script
     }
 
+    // Forensics (2026-06-18 RCA): the full-shutdown backstop SIGKILLs the daemon
+    // but does NOT reap its PTY tree (no killProcessTree here, no Job Object), so
+    // the claude/node grandchildren are orphaned. Log each such kill.
+    console.warn(
+      `[launcher] killDaemonByPidFile SIGKILL daemon PID ${pid} WITHOUT tree-kill — descendant PTY subtrees may be orphaned`,
+    );
     process.kill(pid, 'SIGKILL');
     return true;
   } catch {

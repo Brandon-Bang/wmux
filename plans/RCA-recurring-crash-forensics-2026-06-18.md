@@ -5,8 +5,9 @@
 
 ## 0. 상태
 
-- **이번 변경 = 진단 계측(로그)만 배포.** 동작 수정 아님. 버그가 현재 재현 불가하므로, 선행 RCA의 P0 원칙("관측성 먼저 → 다음 재발 시 로그로 트리거 확정")을 그대로 따른다.
-- **실제 코드 수정(§6)은 미구현** — 로그로 트리거가 확정된 뒤 PR 1개씩, 적대적 검증 + GUI dogfood로 진행(고위험 daemon-lifecycle 정책).
+- **1단계(진단 계측) 배포 완료** — 아래 §8의 로그 마커. 재현 불가하므로 선행 RCA의 P0 원칙("관측성 먼저 → 다음 재발 시 로그로 트리거 확정")을 따른다.
+- **2단계(저위험 수정 2건) 적용 완료 (2026-06-18):** §6-1(generic `shutdown()` → `hardExit`), §6-2(launcher SIGKILL 직전 `killProcessTree`로 트리 회수). 기존 검증된 메커니즘만 재사용, 신규 의존성 없음, 타입체크 + 402 테스트 통과. **GUI dogfood로 실환경 확인 필요.**
+- **나머지 §6 항목은 미구현** — Job Object 테더, F3/F4, `-1` 위조 제거, 에이전트 시작명령 영속화, 잔존 누수 추적, ProcessMonitor 보강. 고위험 daemon-lifecycle은 PR 1개씩 적대적 검증 + GUI dogfood로 진행.
 
 ## 1. 한 줄 결론
 
@@ -55,11 +56,11 @@
   - 5e31946(tree-kill + hardExit)은 **graceful 경로에만** 연결됨(`destroySession`/`PTYManager.dispose`, `daemon.shutdown` RPC). **launcher SIGKILL·SIGTERM/idle/uncaught의 `process.exit(0)`** 는 미적용 → 좀비/고아 잔존(이 RCA의 핵심 회귀).
   - F3(multi-orphan reaper)·F4(parent-liveness tether)는 선행 RCA에서 명시적으로 **미구현**.
 
-## 6. 후속 코드 수정 (로그 아님 — 다음 PR로 분리, 로그로 트리거 확정 후)
+## 6. 후속 코드 수정
 
-1. **generic `shutdown()` 최종 exit를 `hardExit()`로 라우팅**(현재 `daemon.shutdown` RPC 경로만). SIGTERM/SIGINT/idle/uncaught도 conhost wedge를 우회 — 좀비 데몬의 가장 직접적 수정.
-2. **launcher SIGKILL 전에 PTY 트리 reap** — `killProcessTree`를 `launcher.ts`(641·782)에 연결, **또는** 데몬 소유 Windows **Job Object(kill-on-close)** 로 모든 abrupt-death 경로를 OS가 cascade-reap.
-3. **F3**(데몬 image+cmdline로 전(全) 세대 열거·reap) + **F4**(부모 PID 핸드셰이크로 부모 사망 시 self-reap).
+1. ✅ **[DONE 2026-06-18]** generic `shutdown()` 최종 exit를 `hardExit()`로 라우팅 (`index.ts:1206`, 10s 타임아웃 가드 `:1097`도 `hardExit(1)`로). SIGTERM/SIGINT/idle/uncaught도 conhost wedge를 우회 — 좀비 데몬의 가장 직접적 수정.
+2. 🟡 **[PARTIAL — DONE 2026-06-18]** launcher SIGKILL 전에 PTY 트리 reap — `killProcessTree`를 `launcher.ts`의 두 kill 사이트(ensureDaemon respawn + killDaemonByPidFile)에 연결 완료. **남음:** wmux-개시 kill만 커버 — 외부 강제종료/리부트까지 덮으려면 데몬 소유 Windows **Job Object(kill-on-close)** 필요(네이티브 API → 별도 큰 작업).
+3. **F3**(데몬 image+cmdline로 전(全) 세대 열거·reap) + **F4**(부모 PID 핸드셰이크로 부모 사망 시 self-reap). **미구현.**
 4. **`-1` 위조 중단** — `signal`(이미 `DaemonPTYBridge`가 포착, broadcast에서 누락)·`reason`을 렌더러까지 전달해 "데몬 종료로 종료됨" 등으로 표시.
 5. **에이전트 복원 가능화** — surface별 "시작 명령"(claude 실행)을 영속·재생하거나, 에이전트 pane은 빈 셸 재spawn을 막아 자비스가 복원되게.
 6. **잔존 메모리 누수 추적** — ENOMEM(FATAL_CODE) / uncaught 3-in-30s 차단기를 트립시켜 느린 누수가 전(全) pane 일괄 사망으로 비화하는 경로 차단.

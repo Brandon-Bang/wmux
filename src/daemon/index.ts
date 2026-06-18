@@ -1090,11 +1090,13 @@ async function shutdown(
   shuttingDown = true;
   log('info', `Received ${signal} — shutting down gracefully`);
 
-  // Hard timeout guard — force exit if shutdown hangs
+  // Hard timeout guard — force exit if shutdown hangs. Use hardExit (RCA §6-1):
+  // if shutdown() itself wedged, plain process.exit(1) can wedge the same way,
+  // so go straight to TerminateProcess(self) on Windows.
   const shutdownTimeout = setTimeout(() => {
-    log('error', 'Shutdown timed out after 10s — forcing exit');
+    log('error', 'Shutdown timed out after 10s — forcing exit (hardExit)');
     releaseLock();
-    process.exit(1);
+    hardExit(1);
   }, 10_000);
   shutdownTimeout.unref();
 
@@ -1196,14 +1198,14 @@ async function shutdown(
     log('info', `[shutdown.exit] deferring final exit to caller (skipExit; daemon.shutdown RPC path uses hardExit) pid=${process.pid}`);
     return;
   }
-  // Forensics (2026-06-18 RCA): this path (SIGTERM/SIGINT/idle/uncaughtException)
-  // exits via plain process.exit(0) — NOT hardExit. process.exit(0) can wedge on
-  // retained ConPTY/conhost handles, leaving an undead "zombie" daemon. The
-  // disposeAll above already tree-killed the PTYs on this path, so a wedge here
-  // strands the DAEMON (not the grandchildren). If this is the LAST line for
-  // this pid in the log and the process is still alive, the exit wedged.
-  log('warn', `[shutdown.exit] calling process.exit(0) pid=${process.pid} (NOT hardExit; may wedge on retained ConPTY handles → orphan-daemon zombie)`);
-  process.exit(0);
+  // Fix (2026-06-18 RCA §6-1): exit via hardExit (Windows TerminateProcess of
+  // self), NOT plain process.exit(0). process.exit(0) can wedge on retained
+  // ConPTY/conhost handles, leaving an undead "zombie" daemon — and this path
+  // (SIGTERM/SIGINT/idle/uncaughtException) previously used it, so only the
+  // daemon.shutdown RPC path was wedge-proof. disposeAll above already
+  // tree-killed the PTYs; hardExit guarantees the daemon process itself dies.
+  log('info', `[shutdown.exit] hardExit(0) pid=${process.pid} (TerminateProcess to avoid the ConPTY/conhost process.exit wedge)`);
+  hardExit(0);
 }
 
 // === Main entry point ===

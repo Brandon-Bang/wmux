@@ -17,6 +17,10 @@ On 2026-06-17 the daemon-crash failure class recurred despite the v2.14–v2.16 
 
 All markers land in the existing per-process sinks (`~/.wmux/logs/daemon-*.log`, `%APPDATA%/wmux/logs/main-*.log`; crash-durable, 14-day prune) and are locked by `src/daemon/__tests__/crashForensicsInstrumentation.test.ts` so a refactor can't silently drop them. The RCA's §7 is a grep-by-marker checklist for the next recurrence.
 
+### Fixed
+- **Abrupt daemon kills no longer orphan the PTY tree (RCA §6-2).** The launcher's two `SIGKILL` sites (the unresponsive-daemon respawn in `ensureDaemon` and the full-shutdown `killDaemonByPidFile` backstop) now run `killProcessTree` (`taskkill /T /F`) on the daemon PID *before* the bare `process.kill`, so the `powershell→claude→node-MCP` descendant tree is reaped instead of reparented to the OS. This closes the main wmux-initiated source of the "dozens of orphaned node/Claude processes" pile-up. (External `taskkill`/reboot still orphans until a kill-on-close Job Object lands — tracked in RCA §6-2.)
+- **The daemon no longer risks an undead "zombie" exit on signal/idle shutdown (RCA §6-1).** The generic `shutdown()` path (SIGTERM/SIGINT/idle-timeout/uncaughtException) exited via plain `process.exit(0)`, which can wedge on retained ConPTY/conhost handles — only the `daemon.shutdown` RPC path was wedge-proof. It now exits via `hardExit` (Windows `TerminateProcess` of self), and the 10s hard-timeout guard uses `hardExit(1)` for the same reason.
+
 ## [2.16.2] — 2026-06-03 — daemon hardening: security, split-brain fix, configurable lifecycle
 
 Bundles everything merged since v2.16.1: a token-file permission hardening (security), the duplicate-daemon / split-brain fix behind the "relaunch resets my terminals" bug, configurable daemon lifecycle thresholds, and idle-reap diagnostics. No config changes are required — defaults are unchanged.

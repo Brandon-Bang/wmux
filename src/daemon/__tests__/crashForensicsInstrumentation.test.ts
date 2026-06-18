@@ -8,6 +8,11 @@ import path from 'node:path';
 // node/Claude processes → Jarvis (a long-running agent) is lost. See
 // plans/RCA-recurring-crash-forensics-2026-06-18.md.
 //
+// Update 2026-06-18: the RCA's two lowest-risk fixes have since landed —
+// §6-2 (launcher reaps the PTY tree before SIGKILL) and §6-1 (generic shutdown
+// exits via hardExit, not process.exit(0)) — so the launcher/shutdown cases
+// below now lock FIX invariants; the remaining cases still lock forensics.
+//
 // The bug is not currently reproducible, so these log lines ARE the debugging
 // plan: they land the forensics on disk (daemon ~/.wmux/logs/daemon-*.log,
 // main %APPDATA%/wmux/logs/main-*.log) for the next recurrence. A refactor
@@ -26,11 +31,15 @@ describe('crash-forensics instrumentation — source invariants', () => {
     expect(src).toContain('[killProcessTree] taskkill failed');
   });
 
-  it('launcher warns at BOTH bare-SIGKILL daemon-kill sites (the orphan source)', () => {
+  it('launcher reaps the PTY tree (killProcessTree) before BOTH daemon SIGKILLs', () => {
+    // RCA §6-2 fix: a bare process.kill(daemonPid) orphans the daemon's
+    // powershell->claude->node subtree. killProcessTree (taskkill /T /F) must run
+    // at both kill sites (ensureDaemon respawn + killDaemonByPidFile backstop)
+    // BEFORE the SIGKILL. A regression that drops it re-introduces the orphan leak.
     const src = read('..', '..', 'main', 'daemon', 'launcher.ts');
-    const hits = src.match(/WITHOUT tree-kill/g) ?? [];
-    // ensureDaemon's unresponsive-daemon respawn + killDaemonByPidFile backstop.
-    expect(hits.length).toBeGreaterThanOrEqual(2);
+    expect(src).toMatch(/import \{ killProcessTree \} from/);
+    const calls = src.match(/killProcessTree\((existingPid|pid)\)/g) ?? [];
+    expect(calls.length).toBeGreaterThanOrEqual(2);
   });
 
   it('the main↔renderer boundary records rawExitCode vs the fabricated -1', () => {
@@ -47,8 +56,9 @@ describe('crash-forensics instrumentation — source invariants', () => {
     ['[recovery.cap] skipped', 'recovery cap-skip ids'],
     // unambiguous per-generation boot marker (disambiguates symptom 2)
     ['[boot] daemon generation', 'daemon boot generation marker'],
-    // distinguishes the un-hardExit'd shutdown path (orphan-daemon zombie)
-    ['[shutdown.exit] calling process.exit(0)', 'shutdown final-exit path marker'],
+    // RCA §6-1 fix: generic shutdown() final exit now routes through hardExit(0)
+    // (TerminateProcess) instead of the wedge-prone process.exit(0)
+    ['[shutdown.exit] hardExit(0)', 'shutdown final-exit via hardExit'],
   ])('daemon index.ts contains %s (%s)', (marker) => {
     const src = read('..', 'index.ts');
     expect(src).toContain(marker);

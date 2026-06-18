@@ -7,6 +7,7 @@ import { app, dialog } from 'electron';
 import { getWmuxDir } from '../../daemon/config';
 import { getDaemonPipeName, readDaemonAuthToken } from '../DaemonClient';
 import { DAEMON_EXIT_ALREADY_RUNNING } from '../../shared/constants';
+import { killProcessTree } from '../../shared/killProcessTree';
 
 export interface DaemonInfo {
   pid: number;
@@ -637,15 +638,19 @@ export async function ensureDaemon(): Promise<DaemonInfo> {
               `[launcher] PID ${existingPid} verified wmux daemon (image+cmdline) but unresponsive${token ? ' after escalated re-ping' : ' (no auth token to ping)'} — terminating before respawn`,
             );
             let killSucceeded = true;
-            // Forensics (2026-06-18 RCA): this SIGKILLs the daemon but does NOT
-            // tree-kill its PTYs (killProcessTree is not wired into launcher.ts)
-            // and the PTYs have no Job Object tether — so every
-            // powershell→claude→node-MCP subtree is reparented to the OS and
-            // ORPHANED. This is the primary source of the "dozens of orphaned
-            // node/Claude processes" pile-up; log each such kill.
+            // Fix (2026-06-18 RCA §6-2): reap the daemon's ENTIRE PTY descendant
+            // tree BEFORE killing the daemon itself. node-pty ConPTY kill does not
+            // walk descendants and the daemon has no Job Object tether, so a bare
+            // process.kill(daemonPid) reparents every powershell→claude→node-MCP
+            // subtree to the OS and orphans it — the "dozens of orphaned
+            // node/Claude processes" pile-up. taskkill /T /F (killProcessTree)
+            // walks the tree while the parent→child links are still intact, and
+            // also kills the daemon PID itself, so the process.kill below usually
+            // hits ESRCH (benign) and serves only as a non-Windows backstop.
             console.warn(
-              `[launcher] SIGKILL daemon PID ${existingPid} WITHOUT tree-kill — descendant PTY subtrees (powershell→claude→node) will be orphaned (no killProcessTree at this site, no Job Object)`,
+              `[launcher] terminating unresponsive daemon PID ${existingPid} with PTY-tree reap (killProcessTree /T /F → SIGKILL backstop)`,
             );
+            killProcessTree(existingPid);
             try {
               process.kill(existingPid, 'SIGKILL');
             } catch (err: unknown) {
@@ -788,12 +793,14 @@ export function killDaemonByPidFile(): boolean {
       return false; // definitive: same image but not our daemon script
     }
 
-    // Forensics (2026-06-18 RCA): the full-shutdown backstop SIGKILLs the daemon
-    // but does NOT reap its PTY tree (no killProcessTree here, no Job Object), so
-    // the claude/node grandchildren are orphaned. Log each such kill.
+    // Fix (2026-06-18 RCA §6-2): full-shutdown backstop — reap the daemon's PTY
+    // descendant tree (taskkill /T /F) BEFORE the bare SIGKILL so the
+    // claude/node grandchildren die with the daemon instead of orphaning. The
+    // image+cmdline guards above already confirmed this PID is our daemon.
     console.warn(
-      `[launcher] killDaemonByPidFile SIGKILL daemon PID ${pid} WITHOUT tree-kill — descendant PTY subtrees may be orphaned`,
+      `[launcher] killDaemonByPidFile terminating daemon PID ${pid} with PTY-tree reap (killProcessTree /T /F → SIGKILL backstop)`,
     );
+    killProcessTree(pid);
     process.kill(pid, 'SIGKILL');
     return true;
   } catch {

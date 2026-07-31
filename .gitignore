@@ -127,5 +127,12 @@ core/harness/esctest/vendor/
 
 # Local working notes (never commit)
 HANDOFF-*.md
-plans/
 .workflow/
+
+# Local runtime + generated state (never commit). `plans/` is deliberately NOT
+# here: design and execution documents are tracked so a new session can read
+# the decisions behind the code instead of re-deriving them.
+.tokensave/
+.wmux/
+semantic-review/
+vite.*.dev.tmp.config.ts

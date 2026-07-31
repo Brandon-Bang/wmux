@@ -60,11 +60,11 @@
 - **Depends on:** 권한 경계 인접 → 3모델 패널.
 - **Priority:** P1
 
-## `plans/` 추적 여부 결정 (P2 — 싸지만 계속 걸린다)
-- **What:** `plans/`가 `.gitignore:130`에 있으나 **기존 파일은 추적 중**(gitignore는 이미 추적된 파일에 무효). 그래서 새로 쓴 설계 문서만 사라진다. 2026-07-28에 80KB 4개를 워크트리에서 수동 구조했다.
-- **Why:** 워커 3명이 각각 이 질문을 남겼고, 한 워커는 `git add -f`로 우회 커밋했다(관례 위반). 정하지 않으면 매번 반복된다.
-- **Context:** 미추적 문서: `as-is-to-be-2026-07-28.md`, `orchestration-retro-2026-07-28.md`, `orchestration-primitives-research.md`, `workspace-scoping-survey.md`, `orchestration-action-plan-2026-07-28.md`, 그 외 설계문서 4개.
-- **Priority:** P2
+## ✅ `plans/` 추적 여부 결정 — DONE (2026-07-30)
+- `.gitignore`에서 `plans/` 항목 제거. 새로 작성한 설계 문서가 정상 추적 가능해짐.
+- 기존 추적 중이던 파일은 영향 없음(gitignore는 이미 추적된 파일에 무효).
+- 같은 커밋에서 로컬 런타임/생성물(`.tokensave/`, `.wmux/`, `semantic-review/`, `vite.*.dev.tmp.config.ts`)은 명시적으로 ignore.
+- 워커가 `git add -f`로 우회할 필요 없어짐.
 
 ## `@anthropic-ai/claude-agent-sdk` 재배포 권리 미확인 (P2)
 - **What:** 서명·공증 바이너리에 번들된다(`out/.../Resources/claude-agent-sdk/`). LICENSE.md는 "All rights reserved", 링크된 Anthropic 약관은 **사용**만 부여하고 재배포·서브라이선스·번들링에 침묵. 2026-07-28 양쪽 원문 확인 — 허락도 금지도 없음.

@@ -5,10 +5,13 @@
 // visible — the answer to both "why is it quiet?" and "why is it talking?" is
 // on screen. Click → a dropdown of the three modes.
 //
-//   off     no autonomy (default); also stops running loops + schedules
-//   assist  wakes only when a pane needs input, or to drive a running loop
-//   auto    DANGER: wakes on every agent event; drives panes and presses
-//           approvals on its own judgment, running work to completion
+// The mode says HOW the workspace's Claude is launched (owner decision
+// 2026-08-01) — what WAKES it is a separate stored axis:
+//
+//   off     the brain does not run at all (default); the deck composer is
+//           disabled, and running loops + schedules are torn down
+//   assist  launch Claude in auto (accept-edits) mode
+//   danger  launch Claude in bypass mode (--dangerously-skip-permissions)
 //
 // Self-contained (the DeckLoopPanel / DeckSchedulesPanel pattern): all IPC goes
 // through the injected `api` prop, defaulting to window.electronAPI.deck.mode in
@@ -20,6 +23,7 @@ import { tokenAttrs } from '../../themes';
 import { FOCUS_RING } from '../focusRing';
 import type { AgentMode } from '../../../main/deck/deckAutonomyStore';
 import { requestHooksInstallPrompt } from './HooksInstallPrompt';
+import { notifyAgentModeChanged } from './deckModeBus';
 
 export interface AgentModeApi {
   get: (workspaceId: string) => Promise<{ mode: AgentMode | null }>;
@@ -30,14 +34,14 @@ export interface AgentModeApi {
 }
 
 /** Order shown in the dropdown, least → most autonomous. */
-const MODE_ORDER: readonly AgentMode[] = ['off', 'assist', 'auto'];
+const MODE_ORDER: readonly AgentMode[] = ['off', 'assist', 'danger'];
 
 // Per-mode chip skin so the CURRENT autonomy state reads at a glance (the chip
 // is the one always-visible answer to "why is it quiet/talking?"). Colors map
 // straight onto the DESIGN.md grammar, no new accents:
 //   off     nothing alive → neutral graphite + gray idle dot
 //   assist  alive, safe   → warm --accent (alive/attention) + subtle warm tint
-//   auto    alive + destructive → red --accent-red outline (destructive = red
+//   danger  alive + destructive → red --accent-red outline (destructive = red
 //           tint at rest, never a fill/wash) + red dot, bold for weight
 // `border` is kept on every state (transparent when off) so switching modes
 // never shifts the bar's layout by a pixel.
@@ -50,11 +54,22 @@ const MODE_SKIN: Record<AgentMode, { btn: string; dot: string }> = {
     btn: 'border border-[rgba(var(--accent-rgb),0.45)] text-[var(--accent)] bg-[rgba(var(--accent-rgb),0.12)] font-medium',
     dot: 'bg-[var(--accent)]',
   },
-  auto: {
+  danger: {
     btn: 'border border-[var(--accent-red)] text-[var(--accent-red)] bg-[rgba(var(--bg-surface-rgb),0.6)] font-semibold',
     dot: 'bg-[var(--accent-red)]',
   },
 };
+
+/** The mode arrives over IPC, so it is not guaranteed to be one of ours: a main
+ *  process from a different build (a downgrade, or a dev renderer hot-reloaded
+ *  ahead of a stale main) can still answer with a retired name like `auto`.
+ *  Indexing MODE_SKIN directly then yields undefined and `.btn` throws, which
+ *  takes the whole deck rail down through its ErrorBoundary — a cosmetic lookup
+ *  killing a surface the operator steers the fleet from. Fall back to the `off`
+ *  skin: the most conservative badge, and never a crash. */
+function modeSkin(mode: AgentMode): { btn: string; dot: string } {
+  return MODE_SKIN[mode] ?? MODE_SKIN.off;
+}
 
 function modeLabel(t: (k: string) => string, mode: AgentMode): string {
   return t(`deck.mode.${mode}`) || mode;
@@ -108,8 +123,17 @@ export function AgentModeChip({
       setMode(next); // optimistic
       api
         .set(workspaceId, next)
-        .then((r) => { if (r.ok && r.mode) setMode(r.mode); else setMode(prev); })
-        .catch(() => setMode(prev));
+        .then((r) => {
+          if (r.ok && r.mode) setMode(r.mode);
+          else setMode(prev);
+          // Sibling surfaces re-read the mode from main: `off` disables the
+          // composer, so a flip has to reach it without a remount.
+          notifyAgentModeChanged();
+        })
+        .catch(() => {
+          setMode(prev);
+          notifyAgentModeChanged();
+        });
       // Raising autonomy means the orchestrator is about to rely on lifecycle
       // signals — if the hook bridge is missing, this is the moment to say so.
       // The prompt re-checks install status itself (no-op when installed).
@@ -127,13 +151,13 @@ export function AgentModeChip({
         aria-haspopup="listbox"
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
-        className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[11px] hover:opacity-80 transition-opacity ${MODE_SKIN[mode].btn} ${FOCUS_RING}`}
+        className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[11px] hover:opacity-80 transition-opacity ${modeSkin(mode).btn} ${FOCUS_RING}`}
         title={modeDesc(t, mode)}
       >
         <span
           aria-hidden="true"
           data-agent-mode-dot
-          className={`inline-block w-1.5 h-1.5 rounded-full shrink-0 ${MODE_SKIN[mode].dot}`}
+          className={`inline-block w-1.5 h-1.5 rounded-full shrink-0 ${modeSkin(mode).dot}`}
         />
         {t('deck.mode.label') || 'Mode'}: {modeLabel(t, mode)}
       </button>

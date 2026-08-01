@@ -79,15 +79,21 @@ import {
   renderStaleDecisionBlock,
   isDecisionStale,
   hasPendingDecision,
+  raiseDecision,
   type WorkspaceDecision,
 } from '../../deck/deckDecisionStore';
 import {
   beginOrContinueDeckWork,
   clearActiveDeckWork,
+  isDeckWorkParked,
   loadActiveDeckWork,
   loadActiveDeckWorks,
+  loadLiveDeckWork,
+  loadLiveDeckWorks,
   recordDeckWorkA2aTask,
   renderActiveDeckWorkBlock,
+  setDeckWorkBootId,
+  unparkDeckWork,
 } from '../../deck/deckWorkStore';
 import { scanSkillCatalog, type SkillCatalogEntry } from '../../deck/skillCatalogScan';
 import {
@@ -198,9 +204,9 @@ export function buildFleetTailLine(snapshot: FleetSnapshot | null): string | und
  */
 export function renderAutonomyBlock(mode: AgentMode): string | null {
   switch (mode) {
-    case 'auto':
+    case 'danger':
       return (
-        '[autonomy] mode: auto — you have DECISION AUTHORITY. Resolve forks yourself from ' +
+        '[autonomy] mode: danger — you have DECISION AUTHORITY. Resolve forks yourself from ' +
         'binding policy rules, standing conventions, and memory; escalate via ' +
         'deck_ask_decision ONLY for a genuine residual fork none of those settles (or a risky/' +
         'irreversible action).'
@@ -215,10 +221,41 @@ export function renderAutonomyBlock(mode: AgentMode): string | null {
   }
 }
 
+/**
+ * The workspace mode, as the terminal brain's LAUNCH posture (owner decision
+ * 2026-08-01 — the mode says HOW claude starts, not what wakes it):
+ *   assist → accept-edits, danger → bypass-permissions.
+ * `off` returns null because an off workspace has no brain to launch; the null
+ * is defensive only (refuseWhenModeOff stops every turn before a spawn), and it
+ * resolves to "no flag", i.e. claude's own prompting default. Pure + exported
+ * for unit testing.
+ */
+export function modeToPermissionMode(
+  mode: AgentMode,
+): 'acceptEdits' | 'bypassPermissions' | null {
+  switch (mode) {
+    case 'assist':
+      return 'acceptEdits';
+    case 'danger':
+      return 'bypassPermissions';
+    case 'off':
+      return null;
+  }
+}
+
 export function registerDeckHandler(
   getWindow: GetWindow,
   opts: RegisterDeckHandlerOptions = {},
 ): () => void {
+  // Adopt one process-wide boot identity for durable work records (#733). The
+  // EventBus already mints a per-process UUID at construction, so reusing it
+  // keeps "this boot" meaning the same thing to the work store as it does to
+  // every event consumer. Imported from `events/EventBus` (where the singleton
+  // is defined) rather than from `main/index.ts`, so no cycle is introduced.
+  // Runs before anything can write a record, otherwise records stamped with the
+  // store's own seed value would come back parked.
+  setDeckWorkBootId(eventBus.bootId);
+
   // One-way push: which daemon session holds a workspace's embedded brain TUI
   // (`claude-pty` only; null retires it). Declared before createAdapter so the
   // default factory can hand it to a freshly spawned adapter.
@@ -290,6 +327,15 @@ export function registerDeckHandler(
             },
             onForeignTurnEnd: adapterOpts.onForeignTurnEnd,
             onForeignSessionId: adapterOpts.onForeignSessionId,
+            // The workspace mode IS the launch policy (owner decision
+            // 2026-08-01): assist launches claude in accept-edits, danger in
+            // bypass. Read per spawn, from here rather than inside the adapter,
+            // so the adapter keeps no store dependency. `off` cannot reach a
+            // spawn at all (refuseWhenModeOff gates every turn entry point), so
+            // it maps to the same no-flag default a non-deck embedding gets.
+            resolvePermissionMode: () => modeToPermissionMode(
+              loadWorkspaceMode(adapterOpts.workspaceId),
+            ),
             // The model picker applies to the TUI brain too (`--model`);
             // fullPower is SDK-only (it tunes canUseTool/allowedTools, which
             // an interactive session has no equivalent for).
@@ -448,6 +494,32 @@ export function registerDeckHandler(
       // eslint-disable-next-line no-console
       console.warn('[deck] failed to persist active work:', err);
     }
+  };
+
+  /**
+   * `off` means the terminal brain DOES NOT RUN (owner decision 2026-08-01).
+   *
+   * Every turn entry point calls this before ensureManager, because
+   * ensureManager is what constructs the adapter whose first send spawns the
+   * pty — refusing here is what keeps an `off` workspace from ever having a
+   * live claude. Returns the refusal verdict to hand straight back to the
+   * caller (`{ ok: false, code: 'mode_off' }`, the `{ ok, code }` shape every
+   * other deck handler rejects with), or null to proceed.
+   *
+   * The renderer disables the composer for the same reason, but that is a
+   * courtesy, not the enforcement: schedules, loops, the heartbeat and the pipe
+   * RPC all start turns without going anywhere near it.
+   */
+  const refuseWhenModeOff = (workspaceId: string): { ok: false; code: 'mode_off' } | null => {
+    let mode: AgentMode;
+    try {
+      mode = loadWorkspaceMode(workspaceId);
+    } catch {
+      // An unreadable store already resolves to the product default (off) inside
+      // the loader; this catch only covers a throw it cannot itself absorb.
+      return { ok: false, code: 'mode_off' };
+    }
+    return mode === 'off' ? { ok: false, code: 'mode_off' } : null;
   };
 
   const ensureManager = (
@@ -673,6 +745,10 @@ export function registerDeckHandler(
       if (!text.trim()) return { ok: false, code: 'empty' };
       const workspaceId = readWorkspaceId(req);
       if (!workspaceId) return { ok: false, code: 'invalid_workspace' };
+      // Mode `off`: no brain, so nothing to send to. The composer is disabled
+      // in that state, so this is the race/stale-renderer path.
+      const refusal = refuseWhenModeOff(workspaceId);
+      if (refusal) return refusal;
       let fleetContext = typeof req.fleetContext === 'string' ? req.fleetContext : undefined;
       if (fleetContext && fleetContext.length > FLEET_CONTEXT_MAX_CHARS) {
         fleetContext = fleetContext.slice(0, FLEET_CONTEXT_MAX_CHARS) + '\n…(truncated)';
@@ -924,6 +1000,13 @@ export function registerDeckHandler(
     if (!WORKSPACE_ID_RE.test(workspaceId)) {
       return { ok: false, code: 'invalid_workspace' as const };
     }
+    // Mode `off` = the brain does not run. Checked before the busy check and
+    // before the fleet-slot acquire so an off workspace never spawns a brain,
+    // never consumes a slot, and never waits on the queued gate. Every ambient
+    // driver (heartbeat, loop, scheduler, decision resume, startup reconcile)
+    // routes through here, so this one line is the whole kill switch for them.
+    const modeRefusal = refuseWhenModeOff(workspaceId);
+    if (modeRefusal) return modeRefusal;
     // Per-workspace busy check BEFORE the fleet-slot acquire (3-way review P3):
     // a workspace already running a turn must not momentarily consume — or, for
     // the queued path, sit and WAIT on — one of the scarce global slots. ensureManager
@@ -1174,7 +1257,12 @@ export function registerDeckHandler(
     // A direct human request is a request-scoped opt-in to follow through even
     // when the workspace's resting mode is off. The coalescer grants only
     // follow-up instructions; approvalPress still comes from the standing mode.
-    getActiveWork: (workspaceId) => loadActiveDeckWork(workspaceId),
+    // LIVE only (#733): a parked record must not raise the wake policy to 'all'
+    // or lift the wake budget. At boot the daemon recovers sessions and the
+    // recovered panes emit stop/awaiting-input edges immediately; with the
+    // parked record counted as work-active, those echoes alone were enough to
+    // drive the fleet with nobody having asked for anything this launch.
+    getActiveWork: (workspaceId) => loadLiveDeckWork(workspaceId),
     // Global kill switch (Settings): OFF drops ambient wakes; running loops
     // still wake. Read fresh at every flush so the toggle applies immediately.
     isAutoWakeEnabled: () => loadAutoWakeEnabled(),
@@ -1334,9 +1422,13 @@ export function registerDeckHandler(
   // whether a wake actually fires (the tick conditions only skip obvious no-ops).
   const heartbeatWorkspaceIds = (): string[] => {
     const ids = new Set<string>(managers.keys());
-    // Durable direct requests survive a restart even when the workspace's
+    // Durable direct requests arm the heartbeat even when the workspace's
     // resting autonomy mode is off and no brain manager has been recreated yet.
-    for (const workspaceId of Object.keys(loadActiveDeckWorks())) ids.add(workspaceId);
+    // LIVE records only (#733): that bypass exists for a request the human is
+    // engaged with right now. A record that merely survived a shutdown must not
+    // arm a workspace nobody has spoken to since launch — that turns the
+    // safety-net heartbeat into an unattended driver.
+    for (const workspaceId of Object.keys(loadLiveDeckWorks())) ids.add(workspaceId);
     // A workspace can be armed (autonomy on) before its brain has ever spawned a
     // manager — include every mirrored workspace whose resting mode isn't 'off'.
     const entries = getWorkspaceMirror().getEntries();
@@ -1817,8 +1909,12 @@ export function registerDeckHandler(
     }),
   );
 
-  // ── Per-workspace agent mode (off/assist/auto) ─────────────────────────────
-  const VALID_MODES: ReadonlySet<string> = new Set(['off', 'assist', 'auto']);
+  // ── Per-workspace agent mode (off/assist/danger) ───────────────────────────
+  // The wire accepts only the CURRENT names. A stale renderer sending 'auto'
+  // is rejected rather than silently mapped: LEGACY_MODE_MAP migrates values
+  // read off disk, and letting a live write take the same path would keep the
+  // old name alive on the wire indefinitely.
+  const VALID_MODES: ReadonlySet<string> = new Set(['off', 'assist', 'danger']);
 
   ipcMain.removeHandler(IPC.DECK_MODE_GET);
   ipcMain.handle(
@@ -1854,7 +1950,21 @@ export function registerDeckHandler(
       }
       // `off` is the kill switch: tear down running automation BEFORE writing
       // the mode+caps, so a stopped loop can't race a final wake in between.
-      if (mode === 'off') await tearDownAutomation(workspaceId);
+      if (mode === 'off') {
+        await tearDownAutomation(workspaceId);
+        // …and stop the brain that is ALREADY running. Refusing the next turn
+        // is not enough: a live `claude-pty` brain keeps its TUI on screen, and
+        // that terminal is itself an input path — the operator (or anything
+        // typing into it) drives on past a mode that says the brain does not
+        // run. Nothing else disposes it, so switching to off would leave the
+        // one mode that promises silence still holding a live session.
+        const entry = managers.get(workspaceId);
+        if (entry) {
+          entry.manager.dispose();
+          retireManager(workspaceId);
+          forgetAmbient(workspaceId);
+        }
+      }
       const next = await setWorkspaceMode(workspaceId, mode as AgentMode);
       // setWorkspaceMode reset caps to the pure mode ceiling. If a loop is still
       // running, re-narrow that new ceiling by the loop tier — otherwise raising
@@ -1943,6 +2053,14 @@ export function registerDeckHandler(
         // Stale id, already resolved, or empty answer — nothing to resume.
         return { ok: false, code: 'not_pending' };
       }
+      // A human just answered, which is the confirmation parking waits for, so
+      // a record that survived the last shutdown becomes live again here. Doing
+      // it BEFORE the resume turn matters: the prompt renders the work block,
+      // and a still-parked record would render the PARKED text — "ask the human
+      // and wait" — at the exact moment the human has answered. The resolution
+      // itself rides the prompt, so a "drop it" answer is the brain's to act on;
+      // un-parking grants permission to act, not a decision about what to do.
+      unparkDeckWork(workspaceId);
       // Un-blocked now (hasPendingDecision is false). Kick a resume turn; a busy
       // reject is fine — the resolution rides withLoopContext on the next turn
       // (event / schedule / human) and is consumed then. Fire-and-forget: the
@@ -2119,8 +2237,31 @@ export function registerDeckHandler(
     // heartbeat wakes. Keep the durable record parked so turning auto-wake
     // back on (or a fresh human turn) can resume it without losing ownership.
     if (!loadAutoWakeEnabled()) return;
-    for (const workspaceId of Object.keys(loadActiveDeckWorks())) {
+    for (const [workspaceId, work] of Object.entries(loadActiveDeckWorks())) {
       if (hasPendingDecision(workspaceId)) continue;
+      if (isDeckWorkParked(work)) {
+        // #733: a record that outlived the last shutdown is NOT permission to
+        // drive. This loop runs once, seconds after launch, and used to hand
+        // every surviving record an order to "continue or repair incomplete
+        // work" — with no autonomy mode and no wake budget consulted. That is
+        // what replayed an eight-hour-old objective into a live pane.
+        //
+        // Ask instead of act. A pending decision also blocks every other wake
+        // path for this workspace, so the record stays quiet until the human
+        // answers, and resolving it resumes through the normal path above.
+        // Guarded on hasPendingDecision because the decision store is
+        // last-writer-wins: a real question raised before this timer fired must
+        // never be clobbered by our bookkeeping.
+        await raiseDecision(workspaceId, {
+          question:
+            'A request from before this wmux session is still on the books. Resume it, or drop it?',
+          options: ['Resume it', 'Drop it'],
+          context: renderActiveDeckWorkBlock(work),
+        }).catch(() => {
+          /* best-effort — the record stays parked either way */
+        });
+        continue;
+      }
       await runTurnForWorkspace(ACTIVE_WORK_RECONCILE_PROMPT, workspaceId, { queued: true }).catch(
         () => {
           /* best-effort — durable active work remains for the next wake */

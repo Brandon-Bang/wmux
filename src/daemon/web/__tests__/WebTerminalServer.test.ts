@@ -32,6 +32,9 @@ function makeDeps() {
     // where the daemon actually spawned it. Every diff assertion below expects
     // '/x', which is the whole point.
     meta: { id: 's1', cols: 80, rows: 24, state: 'detached', cwd: '/tmp/osc7-said-so', spawnCwd: '/x' },
+    // A session recovered from a reboot that has not had its first resize yet.
+    // The resize route refuses it — that first resize is the desk's unmute.
+    deferred: false,
     ringBuffer: { readAll: () => Buffer.from('screen-bytes') },
     bridge,
     ptyProcess: { write },
@@ -70,19 +73,56 @@ function makeDeps() {
       cmd: '/usr/bin/bash -l',
     },
   ];
+  // Every geometry the resize route forwarded, and the escape hatch for a
+  // manager that refuses (a pane that died between the lookup and the body).
+  const resizeCalls: Array<{ id: string; cols: number; rows: number }> = [];
+  const resizeBox: {
+    throws: string;
+    /** Store something other than the request, to prove the route reads back. */
+    applyAs: { cols: number; rows: number } | null;
+    /** The pane dies between the resize and the read-back. */
+    vanishAfter: boolean;
+  } = { throws: '', applyAs: null, vanishAfter: false };
   // The real DaemonSessionManager is an EventEmitter; the server tees its
   // session:critical / session:notification events, so the fake must emit too.
   const sessionManager = Object.assign(new EventEmitter(), {
     // Every live pane is gettable, each with its own spawn cwd, so the
     // concurrency bound can be exercised across more than one session.
     getSession: (id: string) => {
+      if (resizeBox.vanishAfter && resizeCalls.length > 0) return undefined;
       if (id === 's1') return managed;
       const row = live.find((l) => l.id === id);
       return row
-        ? { ...managed, meta: { ...managed.meta, id, cwd: '/tmp/osc7-said-so', spawnCwd: row.cwd } }
+        ? {
+            ...managed,
+            // `state` is carried through because the resize route reads it —
+            // s2 is the attached pane the desk owns.
+            meta: {
+              ...managed.meta,
+              id,
+              state: row.state,
+              cols: row.cols,
+              rows: row.rows,
+              cwd: '/tmp/osc7-said-so',
+              spawnCwd: row.cwd,
+            },
+          }
         : undefined;
     },
     listLiveSessions: () => live,
+    resizeSession: (id: string, cols: number, rows: number) => {
+      resizeCalls.push({ id, cols, rows });
+      if (resizeBox.throws) throw new Error(resizeBox.throws);
+      // The manager may store something other than what was asked for (it
+      // floors both axes), so a route that echoed the REQUEST rather than the
+      // applied geometry has to fail here rather than in the field.
+      const applied = resizeBox.applyAs ?? { cols: Math.max(10, cols), rows: Math.max(2, rows) };
+      const target = id === 's1' ? managed.meta : live.find((l) => l.id === id);
+      if (target) {
+        target.cols = applied.cols;
+        target.rows = applied.rows;
+      }
+    },
   }) as unknown as DaemonSessionManager;
   // Lifecycle stand-in for the daemon's own daemon.createSession /
   // daemon.destroySession handlers (src/daemon/index.ts). The real ones spawn a
@@ -144,6 +184,7 @@ function makeDeps() {
 
   return {
     sessionManager, bridge, write, live, managed,
+    resizeCalls, resizeBox,
     lifecycle, lifecycleCalls, lifecycleBox,
     git, gitCalls, gitScript, gitGate, uploadsDir,
     ...makeApprovals(), ...makeDevices(),
@@ -198,6 +239,15 @@ function makeDevices() {
       if (rec.revoked) return { ok: false, reason: 'revoked' };
       if (!/^[0-9a-f]{64,200}$/.test(input.apnsToken)) return { ok: false, reason: 'bad-token' };
       if (Buffer.from(input.publicKey, 'base64').length !== 32) return { ok: false, reason: 'bad-key' };
+      // The real store owns this allowlist; the fake mirrors it so the route's
+      // 400 mapping is exercised rather than assumed.
+      if (
+        input.apnsEnvironment !== undefined &&
+        input.apnsEnvironment !== 'development' &&
+        input.apnsEnvironment !== 'production'
+      ) {
+        return { ok: false, reason: 'bad-apns-environment' };
+      }
       return { ok: true };
     },
   };
@@ -284,12 +334,14 @@ describe('WebTerminalServer', () => {
   let pushRegistrations: Array<{ deviceId: string; apnsToken: string; publicKey: string }>;
   let deviceTouchCalls: string[];
   let deviceBox: { mintThrows: boolean };
+  let resizeCalls: Array<{ id: string; cols: number; rows: number }>;
+  let resizeBox: ReturnType<typeof makeDeps>['resizeBox'];
   let lifecycleCalls: Array<{ op: 'create' | 'destroy'; arg: unknown }>;
   let lifecycleBox: { createThrows: string; destroyThrows: string; createGoesMissing: boolean };
   let gitCalls: Array<{ args: readonly string[]; cwd: string }>;
   let gitScript: Record<string, { ok: boolean; stdout: string; stderr: string; ran?: boolean }>;
   let gitGate: { hold: Promise<void> | null };
-  let managed: { meta: Record<string, unknown> };
+  let managed: { meta: Record<string, unknown>; deferred: boolean };
   let live: ReturnType<typeof makeDeps>['live'];
   let uploadsDir: string;
 
@@ -308,6 +360,8 @@ describe('WebTerminalServer', () => {
     pushRegistrations = deps.pushRegistrations;
     deviceTouchCalls = deps.deviceTouchCalls;
     deviceBox = deps.deviceBox;
+    resizeCalls = deps.resizeCalls;
+    resizeBox = deps.resizeBox;
     lifecycleCalls = deps.lifecycleCalls;
     lifecycleBox = deps.lifecycleBox;
     gitCalls = deps.gitCalls;
@@ -1887,6 +1941,74 @@ describe('WebTerminalServer', () => {
     expect((await asOperator.json()).error).toBe('push-is-for-devices');
   });
 
+  it('★ carries the APNs stage the build named, and omits it when it named none', async () => {
+    await startRO();
+    const { token } = await pairDevice('Phone');
+    const apnsToken = 'a'.repeat(64);
+    const publicKey = Buffer.alloc(32, 3).toString('base64');
+    const post = (body: unknown) =>
+      fetch(`${base()}/api/push-registration`, {
+        method: 'POST',
+        headers: { ...bearer(token), 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+    expect((await post({ apnsToken, publicKey, apnsEnvironment: 'development' })).status).toBe(200);
+    expect(pushRegistrations.at(-1)).toEqual({
+      deviceId: 'dev-1', apnsToken, publicKey, apnsEnvironment: 'development',
+    });
+
+    // ABSENT STAYS ABSENT. The simulator has no provisioning profile to read a
+    // stage out of, and a stage guessed here routes the token to the host that
+    // rejects it — a BadDeviceToken that traces back to nothing.
+    expect((await post({ apnsToken, publicKey })).status).toBe(200);
+    expect(pushRegistrations.at(-1)).toEqual({ deviceId: 'dev-1', apnsToken, publicKey });
+
+    // Present but not one of Apple's two words is a client bug, said out loud.
+    for (const apnsEnvironment of ['staging', null, 42, { env: 'production' }, ['production']]) {
+      const bad = await post({ apnsToken, publicKey, apnsEnvironment });
+      // ★ A non-STRING must not be coerced to absent. Silently doing that
+      // answers 200 while the wholesale replace deletes a stage the daemon
+      // already knew — routing that device to the host that rejects it, in
+      // answer to a request the contract promises to refuse.
+      expect(bad.status, JSON.stringify(apnsEnvironment)).toBe(400);
+      expect((await bad.json()).error).toBe('bad-apns-environment');
+    }
+  });
+
+  it('★ survives a JSON body that is a scalar, on every route that reads one', async () => {
+    // `123` is valid JSON. It reaches a handler as a NUMBER, `(body ?? {})`
+    // leaves it one, and `'field' in 123` is a TypeError thrown inside
+    // `req.on('end')` — where nothing catches it. That is one line of request
+    // body from any paired device taking the daemon down with it.
+    const info = await startRW();
+    const { token } = await pairDevice('Phone');
+    const scalars = ['123', '"production"', 'true', 'null', '[]'];
+    const routes: Array<[string, string]> = [
+      ['POST', '/api/push-registration'],
+      ['POST', '/api/sessions/s1/resize'],
+      ['POST', '/api/sessions'],
+      ['POST', `/api/approvals/${'ap-scalar'}`],
+    ];
+    approvalRecords.push(mkApproval({ id: 'ap-scalar' }));
+
+    for (const [method, path] of routes) {
+      for (const body of scalars) {
+        const res = await fetch(`${base()}${path}`, {
+          method,
+          headers: { ...bearer(token), 'Content-Type': 'application/json' },
+          body,
+        });
+        // Any answer is fine — 400, 404, 409. What must NOT happen is the
+        // socket dying because the handler threw.
+        expect(res.status, `${method} ${path} ← ${body}`).toBeLessThan(500);
+      }
+    }
+    // Still serving after all of that.
+    expect((await fetch(`${base()}/api/config`, { headers: bearer(token) })).status).toBe(200);
+    expect(info.running).toBe(true);
+  });
+
   it('rejects a malformed token or key with 400', async () => {
     await startRO();
     const { token } = await pairDevice('Phone');
@@ -2454,6 +2576,156 @@ describe('WebTerminalServer', () => {
     expect(server.disconnectDevice(device.deviceId)).toBe(0);
     pane.ac.abort();
   });
+  // ── pane geometry ─────────────────────────────────────────────────────────
+
+  const postResize = (id: string, cred: string, body: unknown) =>
+    fetch(`${base()}/api/sessions/${encodeURIComponent(id)}/resize`, {
+      method: 'POST',
+      headers: { ...bearer(cred), 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+  it('★ resizes a detached pane, and answers with the geometry that was APPLIED', async () => {
+    const token = (await startRO()).token as string;
+
+    const res = await postResize('s1', token, { cols: 60, rows: 30 });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ cols: 60, rows: 30, owner: 'caller' });
+    expect(resizeCalls).toEqual([{ id: 's1', cols: 60, rows: 30 }]);
+    // Note the server: startRO. A SIGWINCH is not a keystroke, and gating this
+    // on --allow-input would leave the phone letterboxed on every daemon that
+    // has not opted into arbitrary execution.
+  });
+
+  it('★ refuses while the desk is attached, and says what to render at instead', async () => {
+    const token = (await startRO()).token as string;
+    // s2 is the attached pane. One PTY cannot be two geometries, and the desk
+    // re-derives its own on every layout pass — applying the phone's numbers
+    // here starts a fight, not a resize.
+    const res = await postResize('s2', token, { cols: 60, rows: 30 });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      error: 'desk-owns-size',
+      cols: 80,
+      rows: 24,
+      owner: 'desk',
+    });
+    expect(resizeCalls).toEqual([]);
+  });
+
+  it('★ reports the record, never the request', async () => {
+    const token = (await startRO()).token as string;
+    // The manager is free to store something other than what was asked for.
+    // A route that echoed the request would report a width no PTY ever had.
+    resizeBox.applyAs = { cols: 72, rows: 28 };
+    const res = await postResize('s1', token, { cols: 65, rows: 50 });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ cols: 72, rows: 28, owner: 'caller' });
+  });
+
+  it('★ a pane that vanishes mid-resize is a 409, not a 200 with the request echoed', async () => {
+    const token = (await startRO()).token as string;
+    resizeBox.vanishAfter = true;
+    const res = await postResize('s1', token, { cols: 65, rows: 50 });
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toBe('resize-failed');
+  });
+
+  it('★ refuses a geometry no human would use, well above the crash floor', async () => {
+    const token = (await startRO()).token as string;
+    for (const body of [
+      // 10 cols does not crash zsh — that is all the manager's floor promises.
+      // It DOES hard-wrap everything the pane prints, and scrollback does not
+      // re-flow, so those bytes are ruined for good. The route's own floor is
+      // about what a terminal is for, not about what survives.
+      { cols: 10, rows: 30 },
+      { cols: 39, rows: 30 },
+      { cols: 60, rows: 7 },
+      { cols: 0, rows: 30 },
+      { cols: 60.5, rows: 30 },
+      { cols: 1001, rows: 30 },
+      { cols: 60, rows: 1001 },
+      { cols: '60', rows: 30 },
+      { rows: 30 },
+      {},
+    ]) {
+      const res = await postResize('s1', token, body);
+      expect(res.status, JSON.stringify(body)).toBe(400);
+      expect((await res.json()).error).toBe('bad-geometry');
+    }
+    expect(resizeCalls).toEqual([]);
+  });
+
+  it('★ bounds how often ONE session can be resized', async () => {
+    // Not only about CPU. Every accepted resize stamps the bridge's redraw
+    // guard, and a device that keeps that guard permanently armed stops
+    // AgentDetector from ever emitting a new prompt — approvals go silent.
+    let clock = 1_000_000;
+    const limited = new WebTerminalServer({
+      sessionManager, log: () => { /* silent */ }, assetsDir: os.tmpdir(), now: () => clock,
+    });
+    const info = await limited.start({ port: 0, host: '127.0.0.1', allowInput: false, allowUpload: false });
+    const at = `http://127.0.0.1:${info.port}/api/sessions/s1/resize`;
+    const send = (cols: number) =>
+      fetch(at, {
+        method: 'POST',
+        headers: { ...bearer(info.token as string), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cols, rows: 30 }),
+      });
+    try {
+      expect((await send(60)).status).toBe(200);
+
+      const tooSoon = await send(61);
+      expect(tooSoon.status).toBe(429);
+      const body = await tooSoon.json();
+      expect(body.error).toBe('resize-too-often');
+      // Carries somewhere to render meanwhile, and when to try again.
+      expect(body.retryAfterMs).toBeGreaterThan(0);
+      expect(body.cols).toBeGreaterThan(0);
+      expect(resizeCalls).toHaveLength(1);
+
+      clock += 250;
+      expect((await send(62)).status).toBe(200);
+      expect(resizeCalls).toHaveLength(2);
+    } finally {
+      await limited.stop();
+    }
+  });
+
+  it('★ refuses a pane that is still recovering', async () => {
+    // The first resize of a deferred session is the desk's unmute handshake.
+    // Taking it here starts capture at the phone's geometry and interleaves
+    // pre-resize output into scrollback, which cannot be re-flowed later.
+    const token = (await startRO()).token as string;
+    managed.deferred = true;
+    const res = await postResize('s1', token, { cols: 65, rows: 50 });
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toBe('resize-failed');
+    expect(resizeCalls).toEqual([]);
+  });
+
+  it('404s an unknown pane and 409s one the manager refuses, without echoing its wording', async () => {
+    const token = (await startRO()).token as string;
+    expect((await postResize('nope', token, { cols: 60, rows: 30 })).status).toBe(404);
+
+    resizeBox.throws = "Session 's1' is dead: /Users/someone/secret/path";
+    const res = await postResize('s1', token, { cols: 60, rows: 30 });
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.error).toBe('resize-failed');
+    // The daemon's own message names session ids and paths. It belongs in the
+    // log, not on a wire a paired device reads.
+    expect(JSON.stringify(body)).not.toContain('secret');
+    expect(JSON.stringify(body)).not.toContain('s1');
+  });
+
+  it('gates the resize route on the Bearer token, and a paired phone may call it', async () => {
+    await startRO();
+    expect((await postResize('s1', 'nonsense', { cols: 60, rows: 30 })).status).toBe(401);
+    const { token } = await pairDevice('Phone');
+    expect((await postResize('s1', token, { cols: 60, rows: 30 })).status).toBe(200);
+  });
+
   // ── pane diff (read-only git) ──────────────────────────────────────────────
 
   const getDiff = (id: string, cred: string) =>

@@ -264,6 +264,56 @@ app-owned conversation history. Without `--allow-input`, send neither; never
 forward generic taps or drags, guess a mouse protocol, or pretend the alternate
 buffer is locally scrollable.
 
+### Resizing a pane — the desk owns the size whenever it is attached
+
+```
+POST /api/sessions/<id>/resize   body: {cols, rows}
+  → 200 {cols, rows, owner: 'caller'}
+  → 400 {error: 'bad-geometry'}          cols 40..1000, rows 8..1000, integers
+  → 404 {error: 'session not found'}
+  → 409 {error: 'desk-owns-size', cols, rows, owner: 'desk'}
+  → 409 {error: 'resize-failed', detail} dead, suspended, or still recovering
+  → 429 {error: 'resize-too-often', cols, rows, retryAfterMs}
+```
+
+A desk pane is commonly 151×47, and no readable phone font fits 151 columns. The
+wrapping happens in the PTY, before any client sees a byte, so the daemon is the
+only thing that can fix it.
+
+**Ownership.** There is one PTY behind both views and it can have one geometry.
+While a desk renderer has the pane wired (`state: 'attached'` in
+`/api/sessions`), that geometry is the desk's: the 409 carries the current
+`cols`/`rows` so you can render to them without a second request. A `detached`
+pane takes your numbers. You do not have to hand ownership back — a desk client
+re-derives its geometry from its own bounds and resizes on attach.
+
+Do not treat the 409 as an error to retry. It is the answer: render at the size
+it names, and try again after the pane's `state` goes `detached`.
+
+**Render at the geometry in the 200, not at the one you asked for.** The daemon
+answers with what it stored, which is not promised to equal the request.
+
+**Debounce, and bound the geometry.** One session accepts a resize at most every
+250 ms; anything sooner is `429` carrying `retryAfterMs` and the pane's current
+size. This is not only about load — every accepted resize arms the daemon's
+redraw guard, and a client resizing in a tight loop can stop new approvals from
+being detected at all. Drive this from settled layout, never from an animation
+frame.
+
+The floor is `cols >= 40`, `rows >= 8` — well above the 10/2 the daemon itself
+tolerates. That lower pair only promises the shell will not crash; a pane driven
+to 10 columns hard-wraps everything it prints, and scrollback does not re-flow,
+so those bytes stay ruined after the desk takes its size back.
+
+The route is additive, so it does **not** move `protocolVersion` (§1). A daemon
+that predates it has no such route and answers 404 for a pane you just listed —
+which is the probe: treat a 404 for a live id exactly like the 409, render at the
+pane's own `cols`/`rows`, and do not ask again this connection.
+
+Available **without `--allow-input`**, unlike the keyboard and the two lifecycle
+routes below: this delivers a SIGWINCH and changes two numbers. No byte reaches
+the child's stdin and nothing is executed. The Bearer gate still applies.
+
 ### Creating and closing panes
 
 ```
@@ -514,10 +564,21 @@ float**; standard base64 **with** padding (not base64url); a 12-byte nonce; and 
 byte-for-byte, case-sensitive `deviceId`.
 
 The decrypted plaintext is additive JSON: `title`, `body`, optional
-`approvalId`, optional `sessionId`, and optional `requiresInAppChoice`. When
-`requiresInAppChoice` is true, the Notification Service Extension must use an
-affirmative-free category: the person has to open the app and pick a structured
-choice. Older payloads omit the field and older extensions ignore it.
+`approvalId`, optional `sessionId`, optional `requiresInAppChoice`, and `risk`.
+When `requiresInAppChoice` is true, the Notification Service Extension must use
+an affirmative-free category: the person has to open the app and pick a
+structured choice. Older payloads omit the field and older extensions ignore it.
+
+`risk` is the **one field whose sealed meaning differs from its REST meaning**.
+On `/api/approvals` it is omitted when no pattern matched (§6, "a hint, not a
+gate"). Here it is always present on an approval — `'critical'` or `'normal'` —
+because the extension has no store to consult and cannot tell a daemon that
+predates the field from one that judged the approval ordinary. It therefore
+withholds the lock-screen Approve button unless a value positively says
+`'normal'`: a missing field costs somebody a trip into the app, a wrong guess
+costs a destructive command approved from a locked pocket. Adding a third level
+is a two-sided change — the extension grants the affirmative to everything that
+is not `'critical'`, so a new level shipped daemon-side alone reads as ordinary.
 
 Reject an envelope older than `PUSH_MAX_AGE_MS` (300 000 ms).
 
@@ -530,9 +591,9 @@ If the extension does not run, the lock screen shows a fixed placeholder
 
 ```
 POST /api/push-registration      (device credential, never the operator token)
-  body: {apnsToken, publicKey}
+  body: {apnsToken, publicKey, apnsEnvironment?: 'development' | 'production'}
   → 200 {ok: true}
-  → 400 {error: 'bad-token' | 'bad-key'}
+  → 400 {error: 'bad-token' | 'bad-key' | 'bad-apns-environment'}
   → 403 {error: 'push-is-for-devices'}
   → 409 {error: 'revoked' | 'not-found' | 'persist-failed'}
   → 503 {error: 'push-unavailable'}
@@ -543,6 +604,23 @@ X25519 public key. Register on every launch — APNs rotates tokens, and a
 registration replaces the previous one wholesale rather than merging, so a
 regenerated key pair never leaves the daemon sealing to a key you no longer
 hold.
+
+`apnsEnvironment` is which APNs stage minted your token — read it from
+`aps-environment` in your own embedded provisioning profile, never inferred from
+a build configuration.
+
+**Omit it, never guess it.** An APNs token does not say which stage it came
+from and Apple's two hosts reject each other's, so the daemon stores this per
+device and routes on it. Absent means "use whatever the relay was configured
+with", which is what happened for every device before this field existed and is
+the right answer for a build that cannot name its own stage (the simulator has
+no profile). A stage sent on a hunch earns a `BadDeviceToken` that traces back to
+nothing. A value that is neither word is a `400`, not a silent drop.
+
+A registration replaces the previous one wholesale, this field included: leaving
+it out on a later call **clears** a stage the daemon knew, rather than inheriting
+it. That is deliberate — the token now on file belongs to the build that just
+called, not to the one before it.
 
 A `410` from Apple makes the daemon forget your registration, so a reinstalled
 app must register again before it hears anything.

@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { BrowserWindow } from 'electron';
 import { RpcRouter } from '../../RpcRouter';
-import { registerInputRpc, decideTerminalOmittedTarget } from '../input.rpc';
+import { registerInputRpc, decideTerminalOmittedTarget, isSessionTerminatingInput } from '../input.rpc';
+import { noteGateVerdict, resetGateVerdicts } from '../../../deck/stopGateState';
 import type { RoleBindingResolver } from '../input.rpc';
 import type { PTYManager } from '../../../pty/PTYManager';
 import type { RoleBinding } from '../../../../shared/orchestratorRole';
@@ -505,5 +506,90 @@ describe('input.send — role→model enforcement (D2)', () => {
       },
     });
     expect(writeMock.mock.calls[0]).toEqual(['pty-a', 'claude code is failing on windows']);
+  });
+});
+
+
+// Regression: #733 — the brain ran `exit`, then Ctrl+D, in a live user shell to
+// clear a pane stuck at `running`. This is the detector half of the guard that
+// now refuses that. Narrow on purpose: it backstops one escalation, it is not a
+// sandbox, so a false positive (blocking a legitimate write) costs more than a
+// miss.
+describe('isSessionTerminatingInput (#733)', () => {
+  it('matches the ways a session actually gets ended', () => {
+    expect(isSessionTerminatingInput('exit')).toBe(true);
+    expect(isSessionTerminatingInput('exit\r')).toBe(true);
+    expect(isSessionTerminatingInput('  exit  \n')).toBe(true);
+    expect(isSessionTerminatingInput('EXIT')).toBe(true);
+    expect(isSessionTerminatingInput('logout')).toBe(true);
+    expect(isSessionTerminatingInput('\x04')).toBe(true);
+  });
+
+  it('leaves ordinary writes alone', () => {
+    expect(isSessionTerminatingInput('npm test')).toBe(false);
+    expect(isSessionTerminatingInput('exit 1')).toBe(false);
+    expect(isSessionTerminatingInput('grep exit log.txt')).toBe(false);
+    expect(isSessionTerminatingInput('tell me how to exit vim')).toBe(false);
+    expect(isSessionTerminatingInput('')).toBe(false);
+  });
+});
+
+// Regression: #733 — the end-to-end seam, not just its parts. The gate records
+// which panes hold it, and this handler is what actually refuses to end one.
+// Both edges are pinned: the protected pane is refused, everything else writes.
+describe('input.send refuses to end a gate-held pane (#733)', () => {
+  function setupWithWrite(): { router: RpcRouter; writeMock: ReturnType<typeof vi.fn> } {
+    const writeMock = vi.fn();
+    const pty = { get: vi.fn(() => ({ id: 'x' })), write: writeMock } as unknown as PTYManager;
+    const router = new RpcRouter();
+    registerInputRpc(router, pty, () => fakeWindow);
+    return { router, writeMock };
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetGateVerdicts();
+    sendToRendererMock.mockImplementation((_w: unknown, method: string) => {
+      if (method === 'input.findOwnerWorkspace') return Promise.resolve({ workspaceId: 'ws-1' });
+      return Promise.resolve(null);
+    });
+  });
+
+  const send = (router: RpcRouter, text: string, ptyId: string) =>
+    router.dispatch({
+      id: 'g',
+      method: 'input.send',
+      params: { text, ptyId, workspaceId: 'ws-1' },
+    });
+
+  it('refuses `exit` aimed at the pane holding the caller open', async () => {
+    const { router, writeMock } = setupWithWrite();
+    noteGateVerdict('ws-1', ['pty-held']);
+    const res = await send(router, 'exit', 'pty-held');
+    expect(res.ok).toBe(false);
+    expect(writeMock).not.toHaveBeenCalled();
+  });
+
+  it('lets the same pane take ordinary work', async () => {
+    const { router, writeMock } = setupWithWrite();
+    noteGateVerdict('ws-1', ['pty-held']);
+    const res = await send(router, 'npm test', 'pty-held');
+    expect(res.ok).toBe(true);
+    expect(writeMock).toHaveBeenCalled();
+  });
+
+  it('lets the caller close a pane the gate is NOT blocked on', async () => {
+    const { router, writeMock } = setupWithWrite();
+    noteGateVerdict('ws-1', ['pty-held']);
+    const res = await send(router, 'exit', 'pty-other');
+    expect(res.ok).toBe(true);
+    expect(writeMock).toHaveBeenCalled();
+  });
+
+  it('lets an unblocked orchestrator close shells as before', async () => {
+    const { router, writeMock } = setupWithWrite();
+    const res = await send(router, 'exit', 'pty-held');
+    expect(res.ok).toBe(true);
+    expect(writeMock).toHaveBeenCalled();
   });
 });

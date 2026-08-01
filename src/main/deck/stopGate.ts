@@ -39,7 +39,17 @@ export const DEFAULT_MAX_CONSECUTIVE_BLOCKS = 3;
  *  "running" means "was running when the renderer last got a frame". */
 export const DEFAULT_MAX_SNAPSHOT_AGE_MS = 30_000;
 
-export type StopGateVerdict = { block: false } | { block: true; reason: string };
+export type StopGateVerdict =
+  | { block: false }
+  /**
+   * `outstandingPtyIds` is the set of panes this refusal is actually about, and
+   * it is EMPTY for a block that names none — an active-work hold with a
+   * missing or stale snapshot. `input.rpc` protects exactly this set (#733), so
+   * it has to travel with the verdict rather than be re-derived by the caller:
+   * a caller re-reading a stale snapshot would protect panes the model was
+   * never told about, which is the drift this field exists to make impossible.
+   */
+  | { block: true; reason: string; outstandingPtyIds: string[] };
 
 /** Pane statuses that mean "this pane still needs the orchestrator". The same
  *  attention set CommanderEventCoalescer treats as non-quiescent. */
@@ -88,7 +98,7 @@ export function evaluateStopGate(input: {
       'deck_complete_work({summary, verification}). If work remains, delegate or unblock the next step.'
     : null;
   if (!snapshot) {
-    return finalizeReason ? { block: true, reason: finalizeReason } : { block: false };
+    return finalizeReason ? { block: true, reason: finalizeReason, outstandingPtyIds: [] } : { block: false };
   }
   // Staleness means pane state cannot be used to infer outstanding workers. An
   // active-work record can still hold the turn because it is durable runtime
@@ -96,23 +106,35 @@ export function evaluateStopGate(input: {
   const maxAge = input.maxSnapshotAgeMs ?? DEFAULT_MAX_SNAPSHOT_AGE_MS;
   const age = (input.now ?? Date.now()) - snapshot.ts;
   if (age > maxAge) {
-    return finalizeReason ? { block: true, reason: finalizeReason } : { block: false };
+    return finalizeReason ? { block: true, reason: finalizeReason, outstandingPtyIds: [] } : { block: false };
   }
 
   const outstanding = snapshot.panes.filter((p) => isOutstanding(p.agentStatus));
   if (outstanding.length === 0) {
-    return finalizeReason ? { block: true, reason: finalizeReason } : { block: false };
+    return finalizeReason ? { block: true, reason: finalizeReason, outstandingPtyIds: [] } : { block: false };
   }
 
   // This string is the ONLY thing the model reads about the refusal, so it
   // names the panes, their statuses, and the action that clears the gate.
+  //
+  // It also has to name what NOT to do. Issue #733: a pane wedged at `running`
+  // held the gate, and the brain escalated to `exit` and then Ctrl+D on a live
+  // user shell — reading "resolve the pane" as "end the pane". A reported
+  // status is not resolved by killing the thing it describes, and the pane
+  // belongs to a human who did not ask for it to close. `input.rpc` enforces
+  // this for the panes named here; the sentence exists so the model does not
+  // have to learn it by being refused.
   const list = outstanding.map(describePane).join(', ');
   const noun = outstanding.length === 1 ? 'pane' : 'panes';
   return {
     block: true,
+    outstandingPtyIds: outstanding.map((p) => p.ptyId),
     reason:
       `Do not end this turn yet: ${outstanding.length} worker ${noun} still need you — ${list}. ` +
       'Check each one (read its screen, answer what it is waiting on, or delegate the next step). ' +
+      'Do NOT close or kill a pane to clear its status — no exit, no Ctrl+D, no kill. ' +
+      'Those sessions belong to the human. If a pane will not resolve, leave it running and ' +
+      'raise it with deck_ask_decision instead of ending it. ' +
       (finalizeReason ?? 'If there is genuinely nothing left for you to do, say so and stop again.'),
   };
 }

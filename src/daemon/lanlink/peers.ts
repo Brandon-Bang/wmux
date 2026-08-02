@@ -118,7 +118,14 @@ export interface PeerStoreOptions {
   reHarden?: (filePath: string) => boolean;
   /** Test seam: override the secure (owner-DACL) machine-key write. */
   secureWrite?: (filePath: string, data: string) => void;
+  /** How long a `lastSeenAt` refresh may sit in memory before it is written (#665). */
+  seenFlushMs?: number;
 }
+
+/** Coalescing window for `lastSeenAt` writes — see PeerStore.noteSeen (#665). */
+export const SEEN_FLUSH_MS = 30_000;
+/** Backoff attempts after a failed flush, before it waits for the next record. */
+export const SEEN_FLUSH_MAX_RETRIES = 3;
 
 export class PeerStore {
   private readonly dir: string;
@@ -128,8 +135,14 @@ export class PeerStore {
   private readonly isLive: (peerUuid: string) => boolean;
   private readonly reHarden: (filePath: string) => boolean;
   private readonly secureWrite: (filePath: string, data: string) => void;
+  private readonly seenFlushMs: number;
   /** Map-backed (C20): lookups can never traverse the prototype chain. */
   private map = new Map<string, PeerRecord>();
+  /** A `lastSeenAt` refresh is live in memory but not yet on disk (#665). */
+  private seenDirty = false;
+  private seenFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  private seenRetries = 0;
+  private disposed = false;
 
   constructor(baseDir: string, opts: PeerStoreOptions = {}) {
     this.dir = path.join(baseDir, 'lanlink');
@@ -138,6 +151,7 @@ export class PeerStore {
     this.isLive = opts.isLive ?? (() => false);
     this.reHarden = opts.reHarden ?? reHardenTokenFileAcl;
     this.secureWrite = opts.secureWrite ?? secureWriteTokenFile;
+    this.seenFlushMs = opts.seenFlushMs ?? SEEN_FLUSH_MS;
     fs.mkdirSync(this.dir, { recursive: true });
     this.machineKey = this.loadOrCreateMachineKey();
     this.load();
@@ -247,11 +261,95 @@ export class PeerStore {
     this.persist();
   }
 
+  /**
+   * Refresh `lastSeenAt` IN MEMORY and arm a coalescing flush (#665).
+   *
+   * This is on the per-record receive path, so it must not persist per call: a
+   * persist is a whole-store atomicWrite + a synchronous owner-DACL re-harden
+   * (on win32 a whoami.exe + powershell.exe shell-out, measured at 1.8-3.8s per
+   * process under AV — and execFileSync blocks the daemon event loop, not just
+   * lanlink). At MAX_RECORDS_PER_SEC a single peer could drive 50 of those a
+   * second and stall the control pipe.
+   *
+   * `lastSeenAt` does not need per-message durability: it only feeds LRU
+   * eviction (pickEvictable) and lanlink.peers.list, both of which read the
+   * in-memory map. The worst a crash before the flush costs is a stale eviction
+   * hint, bounded by the flush delay.
+   *
+   * Call this BEFORE any durable mutator that runs on the same record (the
+   * receive path's bumpHighWater): that persist then carries the fresh timestamp
+   * out with it, so the record costs one write instead of two and leaves nothing
+   * pending for connection teardown to flush.
+   */
   noteSeen(peerUuid: string): void {
+    if (this.disposed) return;
     const r = this.map.get(peerUuid);
     if (!r) return;
     r.lastSeenAt = nowMs();
-    this.persist();
+    this.seenDirty = true;
+    this.armSeenFlush();
+  }
+
+  /**
+   * Write out a pending `lastSeenAt` refresh, if any. Called on the flush timer,
+   * on connection teardown, and on dispose.
+   *
+   * NEVER throws: unlike the security-critical mutators, a failed lastSeenAt
+   * write must not propagate. On the receive path a throw here would take down
+   * the connection through the server's pump() catch (#658).
+   *
+   * Swallowing is NOT harmless, though, and the log says so: on win32 a persist
+   * that cannot re-apply the owner-only DACL unlinks the peer file before it
+   * throws (C12), so the failure this catches can be "the pairings, burns and
+   * high-water marks are no longer on disk", not merely "the timestamp is
+   * stale". Hence the bounded retry below rather than a silent give-up.
+   */
+  flushSeen(): void {
+    this.clearSeenFlush();
+    if (!this.seenDirty) return;
+    try {
+      this.persist(); // clears seenDirty + seenRetries on success
+    } catch (err) {
+      console.error(
+        '[LanLinkPeerStore] failed to flush lastSeenAt — on win32 the peer file may have been removed by the fail-closed ACL branch:',
+        err,
+      );
+      // seenDirty is still set (persist clears it only on success). Retry on a
+      // backoff so a quiet peer's refresh — and a store file that C12 deleted —
+      // is not left waiting for the next inbound record. Bounded: a permanently
+      // broken ACL must not log on a timer forever.
+      if (this.seenRetries < SEEN_FLUSH_MAX_RETRIES) {
+        this.seenRetries += 1;
+        this.armSeenFlush(this.seenFlushMs * 2 ** this.seenRetries);
+      }
+    }
+  }
+
+  private armSeenFlush(delayMs = this.seenFlushMs): void {
+    if (this.seenFlushTimer || this.disposed) return;
+    this.seenFlushTimer = setTimeout(() => {
+      this.seenFlushTimer = null;
+      this.flushSeen();
+    }, delayMs);
+    // Never hold the daemon open for a lastSeenAt write.
+    this.seenFlushTimer.unref?.();
+  }
+
+  private clearSeenFlush(): void {
+    if (!this.seenFlushTimer) return;
+    clearTimeout(this.seenFlushTimer);
+    this.seenFlushTimer = null;
+  }
+
+  /**
+   * Flush a pending lastSeenAt and stop the timer. Idempotent, and final: a late
+   * noteSeen from a socket still draining must not arm a timer nobody will flush.
+   */
+  dispose(): void {
+    if (this.disposed) return;
+    this.flushSeen();
+    this.disposed = true;
+    this.clearSeenFlush();
   }
 
   bumpHighWater(peerUuid: string, senderSeq: number): void {
@@ -333,6 +431,12 @@ export class PeerStore {
       throw new Error('LanLink peer store: could not apply owner-only ACL — refusing to persist secrets');
     }
     this.fsyncBestEffort();
+    // A persist writes the WHOLE store, so it also settles any pending lastSeenAt
+    // refresh — but only once the write actually succeeded, so a failed persist
+    // still leaves the flush timer to retry (#665).
+    this.seenDirty = false;
+    this.seenRetries = 0;
+    this.clearSeenFlush();
   }
 
   private load(): void {

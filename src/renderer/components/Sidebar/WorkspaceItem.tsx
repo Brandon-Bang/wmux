@@ -121,7 +121,7 @@ function WorkspaceContextLine({ metadata, onPortClick }: {
       {metadata.gitBranch && (
         <div className="flex items-center gap-2 mt-1 text-[10px] font-mono text-[var(--text-muted)] min-w-0" data-git-signal-line>
           <span
-            className="truncate max-w-[130px]"
+            className="min-w-0 truncate"
             title={`${t('workspace.gitBranch')}: ${metadata.gitBranch}${metadata.gitIsWorktree ? ` (${t('workspace.gitWorktree')})` : ''}`}
           >
             ⎇ {metadata.gitBranch}
@@ -595,7 +595,7 @@ function WorkspaceItem({ workspaceId, isActive, isMultiview, index, onSelect, on
       <div
         draggable
         {...tokenAttrs('bgSurface', 'bg')}
-        className={`group sidebar-row px-3 py-1.5 cursor-pointer rounded-md select-none ${
+        className={`group sidebar-row px-3 py-1 cursor-pointer rounded-md select-none ${
           isActive
             ? 'sidebar-row-active text-[var(--text-main)]'
             : 'text-[var(--text-subtle)] hover:bg-[rgba(var(--bg-surface-rgb),0.5)] hover:text-[var(--text-sub)]'

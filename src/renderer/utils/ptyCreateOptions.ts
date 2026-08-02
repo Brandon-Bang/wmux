@@ -1,9 +1,13 @@
 import type { SpawnKind } from '../../shared/spawnKind';
+import type { DeadPaneRecovery } from '../../shared/ptyRecovery';
 import { applyRoleBinding, type RoleBinding } from '../../shared/orchestratorRole';
 
 export interface PtyCreateOptions {
   shell?: string;
   cwd?: string;
+  /** Known-dead session cwd candidates. Main validates them in order and
+   * falls back to home; ordinary blank-surface creates leave this absent. */
+  recoveryCwds?: Pick<DeadPaneRecovery, 'spawnCwd' | 'cwd'>;
   cols?: number;
   rows?: number;
   workspaceId?: string;
@@ -44,6 +48,12 @@ export interface PtyCreateOptions {
      * mode only; forwarded through pty.create to the daemon's supervision policy. */
     restorePermissionMode?: boolean;
   };
+}
+
+export interface SurfaceCwdHealInput {
+  spawnedCwd?: string;
+  requestedCwd?: string;
+  recoveryCwds?: Pick<DeadPaneRecovery, 'spawnCwd' | 'cwd'>;
 }
 
 import type { WorkspaceProfile } from '../../shared/types';
@@ -163,9 +173,11 @@ export function resolveStartupCwd(args: {
 
 /**
  * Resolve the starting directory when a mounted Terminal SELF-CREATES a PTY
- * (issue #515). This is a fresh shell for a blank surface — recovery blank-slate,
- * rebind failure, or a dead-session respawn — so the workspace default is
- * authoritative and OUTRANKS the surface's tracked cwd.
+ * (issue #515). This is a fresh shell for an ordinary blank surface — recovery
+ * blank-slate or an unclassified rebind failure — so the workspace default is
+ * authoritative and OUTRANKS the surface's tracked cwd. A known daemon
+ * tombstone takes #650's separate recoveryCwds path and does not call this
+ * resolver.
  *
  * Priority differs from resolveStartupCwd on purpose: profile.startupCwd >
  * surface.cwd (prop) > global startupDirectory > undefined. A contaminated
@@ -184,6 +196,39 @@ export function resolveRespawnCwd(args: {
   if (args.surfaceCwd && args.surfaceCwd.trim().length > 0) return args.surfaceCwd;
   if (args.startupDirectory && args.startupDirectory.trim().length > 0) return args.startupDirectory.trim();
   return undefined;
+}
+
+/**
+ * Decide whether main's actual spawn cwd is safe to persist on the surface.
+ * Ordinary creates preserve the #515 policy: an explicit request must match,
+ * while an unspecified request may accept main's home/default. A known-dead
+ * replacement may persist only one of its two recovery candidates; if main
+ * rejected both and fell back to home, keeping the old surface cwd avoids
+ * turning that fallback into the next pane's apparent working directory.
+ */
+export function shouldHealSurfaceCwd({
+  spawnedCwd,
+  requestedCwd,
+  recoveryCwds,
+}: SurfaceCwdHealInput): boolean {
+  if (!spawnedCwd) return false;
+  const normalize = (value: string) => {
+    let normalized = value.replace(/\\/g, '/').replace(/\/+$/, '');
+    // Match the renderer's existing cwd policy: Windows drive letters are
+    // case-insensitive, while POSIX path segments retain their case.
+    if (/^[A-Za-z]:\//.test(normalized)) {
+      normalized = normalized[0].toLowerCase() + normalized.slice(1);
+    }
+    return normalized;
+  };
+  const spawned = normalize(spawnedCwd);
+
+  if (recoveryCwds !== undefined) {
+    return [recoveryCwds.spawnCwd, recoveryCwds.cwd]
+      .some((candidate) => candidate !== undefined && normalize(candidate) === spawned);
+  }
+
+  return requestedCwd === undefined || normalize(requestedCwd) === spawned;
 }
 
 /**

@@ -361,6 +361,57 @@ describe('AgentDetector', () => {
         riskLevel: 'critical',
       }));
     });
+
+    // #605 — `action` is a label, so two very different force-pushes used to
+    // produce byte-identical events. The matched line is what a heads-up needs.
+    it('carries the matched line, so two hits of one label are distinguishable', () => {
+      const det = new AgentDetector();
+      const cb = vi.fn();
+      det.onCritical(cb);
+
+      det.feed('$ git push --force origin main\n');
+      expect(cb).toHaveBeenCalledWith(expect.objectContaining({
+        action: 'git push --force',
+        matchedLine: '$ git push --force origin main',
+      }));
+
+      det.feed('$ git push -f scratch\n');
+      expect(cb).toHaveBeenLastCalledWith(expect.objectContaining({
+        action: 'git push --force',
+        matchedLine: '$ git push -f scratch',
+      }));
+    });
+
+    it('strips ANSI and control bytes out of the matched line', () => {
+      const det = new AgentDetector();
+      const cb = vi.fn();
+      det.onCritical(cb);
+
+      det.feed('\x1b[31m$ rm -rf\t/tmp/junk\x07\x1b[0m\n');
+      expect(cb.mock.calls[0][0].matchedLine).toBe('$ rm -rf /tmp/junk');
+    });
+
+    it('caps the matched line at the 80 chars the dedup key uses', () => {
+      const det = new AgentDetector();
+      const cb = vi.fn();
+      det.onCritical(cb);
+
+      det.feed(`$ rm -rf /tmp/${'x'.repeat(200)}\n`);
+      expect(cb.mock.calls[0][0].matchedLine).toHaveLength(80);
+    });
+
+    it('dedups lines that differ only by a control byte', () => {
+      const det = new AgentDetector();
+      const cb = vi.fn();
+      det.onCritical(cb);
+
+      // Same visible command, one with a stray tab: they normalize to the same
+      // matchedLine, so the dedup key must match and only one emission fires.
+      det.feed('$ rm -rf /tmp/junk\n');
+      det.feed('$ rm -rf\t/tmp/junk\n');
+      expect(cb).toHaveBeenCalledTimes(1);
+      expect(cb.mock.calls[0][0].matchedLine).toBe('$ rm -rf /tmp/junk');
+    });
   });
 
   // ── Kiro CLI ──────────────────────────────────────────────────────────────

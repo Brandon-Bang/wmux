@@ -1079,8 +1079,13 @@ export function useTerminal(containerRef: React.RefObject<HTMLDivElement | null>
           // A real GPU driver reset (not our pool eviction): the context is
           // gone. Dispose, drop to xterm's DOM renderer, and free our pool slot
           // so the pool stops counting us and can re-grant on the next toggle.
+          // Route through teardownWebglAddon (not a bare addon.dispose()): a
+          // dispose against a genuinely lost context is the most likely one to
+          // throw mid-store and skip xterm's own DOM-renderer restore, which
+          // is exactly the rendererless flicker-then-black state
+          // ensureRendererRestored repairs.
           console.warn('[Terminal] WebGL context lost — falling back to DOM renderer');
-          addon.dispose();
+          teardownWebglAddon(addon, terminal);
           webglAddonRef.current = null;
           webglContextPool.notifyDisposed(webglTokenRef.current);
           try {
@@ -1103,7 +1108,7 @@ export function useTerminal(containerRef: React.RefObject<HTMLDivElement | null>
     // just loses GPU acceleration until it is granted a context again.
     function disposeWebgl() {
       if (!webglAddonRef.current) return;
-      teardownWebglAddon(webglAddonRef.current);
+      teardownWebglAddon(webglAddonRef.current, terminal);
       webglAddonRef.current = null;
       try {
         terminal.refresh(0, terminal.rows - 1);
@@ -1192,7 +1197,7 @@ export function useTerminal(containerRef: React.RefObject<HTMLDivElement | null>
         // recreating — this runs once per terminal on mount, so on a multi-pane
         // restore it is a burst of dispose+create pairs; leaking the old
         // contexts here is a prime zombie-context source.
-        teardownWebglAddon(webglAddonRef.current);
+        teardownWebglAddon(webglAddonRef.current, terminal);
         webglAddonRef.current = null;
         loadWebgl();
       }
@@ -2140,7 +2145,11 @@ export function useTerminal(containerRef: React.RefObject<HTMLDivElement | null>
       // too, not just dispose, or unmount churn leaks zombie contexts (#191 / #197).
       webglContextPool.release(webglTokenRef.current);
       if (webglAddonRef.current) {
-        teardownWebglAddon(webglAddonRef.current);
+        // Pass the terminal so a skipped renderer-restore is repaired even
+        // here: terminal.dispose() below can be DEFERRED by an active drag
+        // (#582), and a rendererless terminal living through that window
+        // throws on every render tick.
+        teardownWebglAddon(webglAddonRef.current, terminal);
         webglAddonRef.current = null;
       }
       loadWebglRef.current = null;

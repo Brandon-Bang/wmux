@@ -13,10 +13,11 @@
 // an untouched workspace referentially stable, and `isActive` is a bool that
 // flips for only two slots on a switch.
 
-import { memo } from 'react';
+import { memo, useEffect, useRef } from 'react';
 import { useStore } from '../../stores';
 import { useT } from '../../hooks/useT';
 import PaneContainer from '../Pane/PaneContainer';
+import { multiviewGridStyle, type MultiviewArrangement } from '../../utils/multiviewGrid';
 import type { Workspace } from '../../../shared/types';
 
 /** One single-view workspace pane subtree. Inactive → display:none (kept mounted).
@@ -61,6 +62,7 @@ const MultiviewWorkspaceSlot = memo(function MultiviewWorkspaceSlot({
   workspace,
   isActive,
   multiviewCount,
+  arrangement,
   onActivate,
   onRemove,
 }: {
@@ -68,11 +70,26 @@ const MultiviewWorkspaceSlot = memo(function MultiviewWorkspaceSlot({
   isActive: boolean;
   /** Count of multiview members — the close handler needs it to hand off focus. */
   multiviewCount: number;
+  /** Current grid arrangement — a layout change can move this tile out of view. */
+  arrangement: MultiviewArrangement;
   onActivate: (id: string) => void;
   onRemove: (id: string, isActive: boolean, multiviewCount: number) => void;
 }) {
+  // An explicit arrangement lets the grid scroll (see multiviewGrid.ts), so a
+  // tile reached by Ctrl+Shift+Arrow can be off-screen. `nearest` scrolls the
+  // minimum needed: nothing at all for a fully visible tile, and just enough to
+  // reveal a partially visible one. Re-run on arrangement and tile count too —
+  // switching auto→columns can push the active tile out of view without
+  // `isActive` ever changing, which would strand the user on a tile they can't
+  // see. Under `auto` the container doesn't scroll, so this is inert there.
+  const tileRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (isActive) tileRef.current?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }, [isActive, arrangement, multiviewCount]);
+
   return (
     <div
+      ref={tileRef}
       className="relative flex flex-col min-w-0 min-h-0 overflow-hidden cursor-pointer"
       style={{
         border: isActive ? '2px solid var(--accent-blue)' : '2px solid transparent',
@@ -128,6 +145,7 @@ export function WorkspaceViewport() {
   const workspaces = useStore((s) => s.workspaces);
   const activeWorkspaceId = useStore((s) => s.activeWorkspaceId);
   const multiviewIds = useStore((s) => s.multiviewIds);
+  const multiviewArrangement = useStore((s) => s.multiviewArrangement);
   // Cold-park (TASK-9): parked ids render a placeholder instead of PaneContainer.
   const parkedWorkspaceIds = useStore((s) => s.parkedWorkspaceIds);
   const paneGate = useStore((s) => s.paneGate);
@@ -170,9 +188,10 @@ export function WorkspaceViewport() {
         className="flex-1 min-h-0"
         style={{
           display: 'grid',
-          gridTemplateColumns:
-            multiviewIds.length === 2 ? '1fr 1fr' : multiviewIds.length <= 4 ? '1fr 1fr' : 'repeat(3, 1fr)',
-          gridAutoRows: '1fr',
+          // Track count comes from `tiles`, not `multiviewIds` — an id whose
+          // workspace is gone is filtered out above, and counting it would
+          // leave an empty column in the grid.
+          ...multiviewGridStyle(tiles.length, multiviewArrangement),
           gap: '2px',
           backgroundColor: 'var(--bg-surface)',
         }}
@@ -183,6 +202,7 @@ export function WorkspaceViewport() {
             workspace={ws}
             isActive={ws.id === activeWorkspaceId}
             multiviewCount={multiviewIds.length}
+            arrangement={multiviewArrangement}
             onActivate={setActiveWorkspace}
             onRemove={handleRemoveTile}
           />

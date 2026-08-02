@@ -662,6 +662,38 @@ export function resetInspectState(state: InspectStateFields): void {
   state.inspectXtermTarget = null;
 }
 
+/**
+ * Move focus off `wsId` before it leaves the multiview grid (#752).
+ *
+ * The render gate gives up unless the active workspace is a member, so dropping
+ * the active one used to take every other tile with it — it read as "the window
+ * reset". The tile ✕ button compensated in the view; the sidebar's Ctrl+click
+ * called the toggle raw and did not. Both go through here now, so they cannot
+ * drift apart again.
+ *
+ * Candidates are filtered to members that still EXIST and are DISTINCT from the
+ * one leaving. `setActiveWorkspace` silently ignores an unknown id, so picking a
+ * stale one would be a no-op and the grid would close anyway; picking a
+ * duplicate of `wsId` would re-activate the very workspace being removed.
+ *
+ * No handoff when fewer than two members would remain — the group disbands on
+ * its own then, and yanking focus would land the user somewhere they never asked
+ * for.
+ */
+function handOffBeforeLeavingGrid(state: StoreState, wsId: string): void {
+  if (wsId !== state.activeWorkspaceId) return;
+  const workspaces = state.workspaces ?? [];
+  const live = state.multiviewIds.filter(
+    (id, i, arr) => arr.indexOf(id) === i && workspaces.some((w) => w.id === id),
+  );
+  if (live.length <= 2) return;
+  const i = live.indexOf(wsId);
+  if (i < 0) return;
+  const next = live[i + 1] ?? live[i - 1];
+  // Route through setActiveWorkspace so activation side-effects fire.
+  if (next && next !== wsId) state.setActiveWorkspace?.(next);
+}
+
 export const createUISlice: StateCreator<StoreState, [['zustand/immer', never]], [], UISlice> = (set, get) => ({
   // ─── Startup gate (Fix 0) ─────────────────────────────────────────────
   paneGate: 'pending',
@@ -1204,7 +1236,9 @@ export const createUISlice: StateCreator<StoreState, [['zustand/immer', never]],
     state.multiviewArrangement = arrangement;
   }),
 
-  toggleMultiviewWorkspace: (wsId) => set((state) => {
+  toggleMultiviewWorkspace: (wsId) => {
+    handOffBeforeLeavingGrid(get(), wsId);
+    set((state) => {
     const idx = state.multiviewIds.indexOf(wsId);
     if (idx >= 0) {
       state.multiviewIds.splice(idx, 1);
@@ -1234,9 +1268,12 @@ export const createUISlice: StateCreator<StoreState, [['zustand/immer', never]],
     if (state.multiviewIds.length <= 1) {
       state.multiviewIds = [];
     }
-  }),
+    });
+  },
 
-  removeMultiviewWorkspace: (wsId) => set((state) => {
+  removeMultiviewWorkspace: (wsId) => {
+    handOffBeforeLeavingGrid(get(), wsId);
+    set((state) => {
     const idx = state.multiviewIds.indexOf(wsId);
     if (idx < 0) return; // no-op on non-members
     state.multiviewIds.splice(idx, 1);
@@ -1244,7 +1281,8 @@ export const createUISlice: StateCreator<StoreState, [['zustand/immer', never]],
     if (state.multiviewIds.length <= 1) {
       state.multiviewIds = [];
     }
-  }),
+    });
+  },
 
   clearMultiview: () => set((state) => {
     state.multiviewIds = [];

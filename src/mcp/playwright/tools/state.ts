@@ -6,7 +6,12 @@ import { PlaywrightEngine } from '../PlaywrightEngine';
 import { withAutomationLease } from '../automationLease';
 import { matchSensitiveDomain } from '../security';
 import { evalFunctionOrRpc } from '../page-eval';
-import { sendRpc } from '../../wmux-client';
+import {
+  allowScopedRpcFallback,
+  sendScopedBrowserRpc,
+  type BrowserTargetScope,
+  type BrowserToolDeps,
+} from '../browserScope';
 
 // Optional surfaceId schema reused across tools
 const optionalSurfaceId = z
@@ -130,13 +135,12 @@ const BROWSER_RESIZE_SHAPE = {
 // the Playwright Page first and falls back to RPC only when no Page is available.
 
 /** Current page URL, transport-agnostic. Used for sensitive-domain checks. */
-async function currentUrl(page: Page | null, surfaceId?: string): Promise<string> {
+async function currentUrl(page: Page | null, scope: BrowserTargetScope): Promise<string> {
   if (page) return page.url();
   try {
-    const r = (await sendRpc('browser.evaluate', {
+    const r = await sendScopedBrowserRpc<{ value: unknown }>('browser.evaluate', scope, {
       expression: 'location.href',
-      ...(surfaceId && { surfaceId }),
-    })) as { value: unknown };
+    });
     return typeof r.value === 'string' ? r.value : '';
   } catch {
     return '';
@@ -156,7 +160,7 @@ async function currentUrl(page: Page | null, surfaceId?: string): Promise<string
  *  - browser_emulate  -- apply various emulation settings
  *  - browser_resize   -- change the viewport size
  */
-export function registerStateTools(server: McpServer): void {
+export function registerStateTools(server: McpServer, deps: BrowserToolDeps): void {
   const engine = PlaywrightEngine.getInstance();
 
   // -----------------------------------------------------------------------
@@ -166,10 +170,10 @@ export function registerStateTools(server: McpServer): void {
     'browser_cookies',
     'Manage browser cookies: get, set, or clear. Reads from sensitive domains (email, banking, auth) are blocked and values from such domains are redacted unless allowSensitiveDomains:true is set.',
     BROWSER_COOKIES_SHAPE,
-    async ({ action, url, cookies, allowSensitiveDomains, surfaceId }) => withAutomationLease(surfaceId, async () => {
+    async ({ action, url, cookies, allowSensitiveDomains, surfaceId }) => withAutomationLease(deps, surfaceId, async (scope) => {
       try {
         // Playwright Page when available (dev), else CDP over RPC (packaged, #111).
-        const page = await engine.getPage(surfaceId).catch(() => null);
+        const page = await engine.getPageForScope(scope).catch(allowScopedRpcFallback);
 
         switch (action) {
           case 'get': {
@@ -184,11 +188,12 @@ export function registerStateTools(server: McpServer): void {
             }
             const allCookies: Array<{ domain?: string; value: string; [k: string]: unknown }> = page
               ? await page.context().cookies(url ? [url] : [])
-              : ((await sendRpc('browser.cookies', {
+              : (await sendScopedBrowserRpc<{
+                  cookies: Array<{ domain?: string; value: string }>;
+                }>('browser.cookies', scope, {
                   action: 'get',
                   urls: url ? [url] : [],
-                  ...(surfaceId && { surfaceId }),
-                })) as { cookies: Array<{ domain?: string; value: string }> }).cookies;
+                })).cookies;
             const safe = allCookies.map((c) => {
               const hit = matchSensitiveDomain(c.domain ?? '');
               if (hit && !allowSensitiveDomains) {
@@ -225,10 +230,9 @@ export function registerStateTools(server: McpServer): void {
             if (page) {
               await page.context().addCookies(cookiesToAdd);
             } else {
-              await sendRpc('browser.cookies', {
+              await sendScopedBrowserRpc('browser.cookies', scope, {
                 action: 'set',
                 cookies: cookiesToAdd,
-                ...(surfaceId && { surfaceId }),
               });
             }
 
@@ -246,9 +250,8 @@ export function registerStateTools(server: McpServer): void {
             if (page) {
               await page.context().clearCookies();
             } else {
-              await sendRpc('browser.cookies', {
+              await sendScopedBrowserRpc('browser.cookies', scope, {
                 action: 'clear',
-                ...(surfaceId && { surfaceId }),
               });
             }
             return {
@@ -276,19 +279,19 @@ export function registerStateTools(server: McpServer): void {
     'browser_storage',
     'Manage localStorage or sessionStorage: get, set, or clear. Reads on sensitive pages (email, banking, auth) are blocked unless allowSensitiveDomains:true is set.',
     BROWSER_STORAGE_SHAPE,
-    async ({ type, action, key, value, allowSensitiveDomains, surfaceId }) => withAutomationLease(surfaceId, async () => {
+    async ({ type, action, key, value, allowSensitiveDomains, surfaceId }) => withAutomationLease(deps, surfaceId, async (scope) => {
       try {
         // browser_storage is pure page.evaluate, so it unifies over the same
         // evaluate transport the extraction tools use: a Playwright Page when
         // available, else browser.evaluate over RPC (packaged builds, #111).
-        const page = await engine.getPage(surfaceId).catch(() => null);
+        const page = await engine.getPageForScope(scope).catch(allowScopedRpcFallback);
 
         const storageName = type === 'local' ? 'localStorage' : 'sessionStorage';
 
         switch (action) {
           case 'get': {
             if (!allowSensitiveDomains) {
-              const sensitive = matchSensitiveDomain(await currentUrl(page, surfaceId));
+              const sensitive = matchSensitiveDomain(await currentUrl(page, scope));
               if (sensitive) {
                 throw new Error(
                   `browser_storage get blocked: current page "${sensitive}" is on the sensitive-domain blocklist (email / banking / auth). ` +
@@ -314,7 +317,7 @@ export function registerStateTools(server: McpServer): void {
                 return entries;
               },
               [storageName, key] as [string, string | undefined],
-              surfaceId,
+              scope,
             );
 
             const text =
@@ -337,7 +340,7 @@ export function registerStateTools(server: McpServer): void {
                 storage.setItem(sKey, sValue);
               },
               [storageName, key, value ?? ''] as [string, string, string],
-              surfaceId,
+              scope,
             );
 
             return {
@@ -358,7 +361,7 @@ export function registerStateTools(server: McpServer): void {
                 storage.clear();
               },
               storageName,
-              surfaceId,
+              scope,
             );
 
             return {
@@ -388,9 +391,9 @@ export function registerStateTools(server: McpServer): void {
     'browser_emulate',
     'Apply emulation settings to the browser page: offline mode, custom headers, HTTP credentials, geolocation, color scheme, timezone, locale, or device preset.',
     BROWSER_EMULATE_SHAPE,
-    async ({ offline, headers, credentials, geo, media, timezone, locale, device, surfaceId }) => withAutomationLease(surfaceId, async () => {
+    async ({ offline, headers, credentials, geo, media, timezone, locale, device, surfaceId }) => withAutomationLease(deps, surfaceId, async (scope) => {
       try {
-        const page = await engine.getPage(surfaceId).catch(() => null);
+        const page = await engine.getPageForScope(scope).catch(allowScopedRpcFallback);
         const applied: string[] = [];
 
         // Resolve a device preset (if any) up front: both transports need its
@@ -516,9 +519,11 @@ export function registerStateTools(server: McpServer): void {
               emulateParams.deviceReset = true;
             }
           }
-          if (surfaceId) emulateParams.surfaceId = surfaceId;
-
-          const res = (await sendRpc('browser.emulate', emulateParams)) as { applied: string[] };
+          const res = await sendScopedBrowserRpc<{ applied: string[] }>(
+            'browser.emulate',
+            scope,
+            emulateParams,
+          );
           applied.push(...res.applied);
         }
 
@@ -558,18 +563,17 @@ export function registerStateTools(server: McpServer): void {
     'browser_resize',
     'Resize the browser viewport to the specified dimensions.',
     BROWSER_RESIZE_SHAPE,
-    async ({ width, height, surfaceId }) => withAutomationLease(surfaceId, async () => {
+    async ({ width, height, surfaceId }) => withAutomationLease(deps, surfaceId, async (scope) => {
       try {
-        const page = await engine.getPage(surfaceId).catch(() => null);
+        const page = await engine.getPageForScope(scope).catch(allowScopedRpcFallback);
 
         if (page) {
           await page.setViewportSize({ width, height });
         } else {
           // Packaged RPC fallback (#111): CDP Emulation.setDeviceMetricsOverride.
-          await sendRpc('browser.resize', {
+          await sendScopedBrowserRpc('browser.resize', scope, {
             width,
             height,
-            ...(surfaceId && { surfaceId }),
           });
         }
 

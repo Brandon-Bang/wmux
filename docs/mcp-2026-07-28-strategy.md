@@ -37,8 +37,8 @@ Grace period: deprecated features remain for at least 12 months. Nothing breaks 
 
 ### Phase 3: Opportunities (quarterly)
 - [ ] **Tasks extension**: exposing wmux's a2a_task_send/query model as the official `io.modelcontextprotocol/tasks` extension gains compatibility with other clients
-- [ ] **Stateless HTTP deployment option**: with sessionless Streamable HTTP, wmux MCP can run on Coolify/serverless for remote orchestration — apply the same principles (stateless + OAuth/OIDC) to the company (KS-) FastAPI MCP servers
-- [ ] If company connectors need auth: start with Client ID Metadata Documents, not DCR
+- [ ] **Stateless HTTP deployment option**: with sessionless Streamable HTTP, wmux MCP can run on Coolify/serverless for remote orchestration
+- [ ] If remote connectors need auth: start with Client ID Metadata Documents, not DCR
 
 ## Non-Goals
 - No rushed migration right after the spec release — no hand-rolled implementations before a stable SDK version

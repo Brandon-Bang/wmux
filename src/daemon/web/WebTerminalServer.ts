@@ -10,6 +10,10 @@ import type { DaemonSessionManager } from '../DaemonSessionManager';
 // a CONSUMER: it lists, it resolves, it republishes lifecycle events. It never
 // constructs a request, and it never decides what bytes a decision means.
 import type { ApprovalEvent, ApprovalRegistryApi, ApprovalRequest } from '../approvals/types';
+// Type only — the projector's implementation (transcript parsing, watch state,
+// fs watching) stays out of this module. The web server is a STATELESS consumer
+// of its `delta()` for the phone turn view (#782); it must never `subscribe()`.
+import type { TranscriptProjector } from '../transcript/TranscriptProjector';
 import { ENV_KEYS, isBrainPty } from '../../shared/constants';
 import { webHostIsLoopback, type PairRefusal, type WebTlsConfig } from '../../shared/web';
 import { capSnapshot } from './snapshotWindow';
@@ -26,6 +30,42 @@ import {
 } from './protocolVersion';
 import { startSseHeartbeat } from './sseHeartbeat';
 import { buildWebCsp } from './webCsp';
+
+/**
+ * Opaque cursor for `/api/sessions/:id/turns` (#782). Encodes head+tail offsets
+ * plus the fileSize `delta()` shrink-checks for a replaced transcript, so the
+ * phone holds an opaque string and never has to understand the byte model.
+ * base64url keeps it URL-safe without percent-encoding the JSON braces.
+ *
+ * mtimeMs is deliberately NOT carried: it moves on every append, so no reset
+ * check can use it (see `TranscriptProjector.delta`). An older cursor that
+ * still holds the field decodes fine — the extra key is ignored.
+ */
+function encodeTurnCursor(c: { headOffset: number; tailOffset: number; fileSize: number }): string {
+  return Buffer.from(
+    JSON.stringify({ head: c.headOffset, tail: c.tailOffset, fileSize: c.fileSize }),
+  ).toString('base64url');
+}
+
+function decodeTurnCursor(
+  s: string | null,
+): { head: number; tail: number; fileSize?: number } | null {
+  if (!s) return null;
+  try {
+    const o = JSON.parse(Buffer.from(s, 'base64url').toString('utf8')) as Record<string, unknown>;
+    if (!o || typeof o !== 'object') return null;
+    const tail = Number(o.tail);
+    const head = Number(o.head ?? o.tail);
+    if (!Number.isFinite(tail) || !Number.isFinite(head)) return null;
+    return {
+      head,
+      tail,
+      fileSize: typeof o.fileSize === 'number' ? o.fileSize : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
 
 /**
  * wmux web — a read-only-by-default browser terminal served BY THE DAEMON.
@@ -101,6 +141,16 @@ export interface WebTerminalStartOptions {
    */
   allowUpload: boolean;
   /**
+   * Whether `GET /api/sessions/:id/turns` serves the transcript turn view
+   * (`--allow-transcript`). Its own flag, NOT folded into `allowInput`: the
+   * transcript carries far wider reading than a mirror (thinking blocks, full
+   * tool inputs, file contents the agent read — the whole session), and the
+   * device credential never expires, so a leak is a category change, not an
+   * increment. Absent → false (a pre-flag daemon reads as off, the same way a
+   * missing `allowUpload` does). (#782)
+   */
+  allowTranscript?: boolean;
+  /**
    * Terminate HTTPS in the daemon with operator-supplied PEM files.
    *
    * Paths are absolute because the CLI and daemon do not necessarily share a
@@ -142,6 +192,8 @@ export interface WebTerminalInfo {
   allowInput?: boolean;
   /** Whether `POST /api/upload` is armed. Its own opt-in, see start options. */
   allowUpload?: boolean;
+  /** Whether `GET /api/sessions/:id/turns` is armed. Its own opt-in (#782). */
+  allowTranscript?: boolean;
   /** True when this listener terminates HTTPS inside the daemon. */
   tls?: boolean;
   token?: string;
@@ -349,6 +401,18 @@ interface WebTerminalServerDeps {
    * sleeping half an hour. Defaults to the wall clock.
    */
   now?: () => number;
+  /**
+   * The daemon's transcript projector — the phone turn-view contract (#782).
+   * Optional like `approvals`: a daemon/test that has not wired one still serves
+   * every other route, and `/api/sessions/:id/turns` answers 503 rather than
+   * pretending the surface exists. The phone path is STATELESS (`delta()` +
+   * nudge only) and must NEVER call `subscribe()` — a late subscriber's
+   * force-reset would scramble every desktop Chat View row sharing the session.
+   * A GETTER, not a direct ref: the daemon builds the projector lazily (after
+   * the first resume binding), so the server captures it at construction and
+   * resolves the live instance per request.
+   */
+  projector?: () => TranscriptProjector | null;
 }
 
 /** Cap a single input POST body so a hostile client cannot exhaust memory. */
@@ -412,6 +476,13 @@ const PAIR_CODE_LEN = 8;
 const ATTENTION_CAP = 100;
 /** Attention entries older than this are dropped even if the cap allows them. */
 const ATTENTION_TTL_MS = 30 * 60 * 1000;
+/**
+ * #782 — coalescing window for the non-recording transcript nudge. A single
+ * turn raises several hook signals in quick succession (activity then stop),
+ * and the phone refetches on every nudge, so one-per-second is the floor that
+ * keeps a write burst from fanning into one fetch per write.
+ */
+const TRANSCRIPT_NUDGE_COALESCE_MS = 1000;
 /** A decision body is two fields; anything larger is not one of ours. */
 const MAX_JSON_BODY_BYTES = 8 * 1024;
 /**
@@ -681,6 +752,16 @@ export class WebTerminalServer {
   private readonly clients = new Set<SseClient>();
   /** Live `/api/events` subscribers — fleet attention, no pane stream attached. */
   private readonly eventClients = new Set<EventClient>();
+  /**
+   * #782 — devices that opened a pane's turn view, keyed by pane. The
+   * non-recording transcript nudge is delivered ONLY to these, so a busy pane's
+   * 1Hz nudges never fill another device's SSE channel. `operator` is a watcher
+   * too (a browser on the operator token can read turns). Values are watcher
+   * keys, not principal objects, so the set stays cheap to consult per nudge.
+   */
+  private readonly transcriptWatchers = new Map<string, Set<string>>();
+  /** Per-pane coalescing timers for the non-recording transcript nudge. */
+  private readonly transcriptNudgeTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   /**
    * Attention replay state.
@@ -957,6 +1038,12 @@ export class WebTerminalServer {
       }
     }
     this.eventClients.clear();
+    // #782 — clear pending non-recording nudge timers and the watcher set; the
+    // SSE clients they would reach are gone, and a fresh start() re-arms nothing
+    // stale (a device re-opens its panes and re-registers as it reads them).
+    for (const timer of this.transcriptNudgeTimers.values()) clearTimeout(timer);
+    this.transcriptNudgeTimers.clear();
+    this.transcriptWatchers.clear();
 
     const server = this.server;
     this.server = null;
@@ -1193,6 +1280,7 @@ export class WebTerminalServer {
         host: this.opts.host,
         allowInput: this.opts.allowInput,
         allowUpload: this.opts.allowUpload,
+        allowTranscript: this.opts?.allowTranscript === true,
         tls: this.opts.tls !== undefined,
         token: this.token,
         urls: this.buildUrls(),
@@ -1392,6 +1480,7 @@ export class WebTerminalServer {
       return this.json(res, 200, {
         allowInput: this.opts?.allowInput === true,
         allowUpload: this.opts?.allowUpload === true,
+        allowTranscript: this.opts?.allowTranscript === true,
         protocolVersion: PHONE_PROTOCOL_VERSION,
         minProtocolVersion: MIN_PHONE_PROTOCOL_VERSION,
         serverVersion: daemonServerVersion(),
@@ -1407,6 +1496,9 @@ export class WebTerminalServer {
       const rest = p.slice('/api/sessions/'.length);
       if (req.method === 'GET' && rest.endsWith('/diff')) {
         return this.handleSessionDiff(res, rest.slice(0, -'/diff'.length));
+      }
+      if (req.method === 'GET' && rest.endsWith('/turns')) {
+        return this.handleSessionTurns(req, res, rest.slice(0, -'/turns'.length), principal);
       }
       if (req.method === 'POST' && rest.endsWith('/resize')) {
         return this.handleSessionResize(req, res, rest.slice(0, -'/resize'.length));
@@ -1624,6 +1716,95 @@ export class WebTerminalServer {
    * paired device achieves is an awkward geometry on a pane nobody is attached
    * to, which the next desk attach corrects.
    */
+  /**
+   * `GET /api/sessions/:id/turns` — the phone turn-view contract (#782).
+   * STATELESS: reads `delta()`/`snapshot()`, NEVER `subscribe()`. A phone that
+   * opened the pane cannot scramble the desktop Chat View sharing the session.
+   *
+   * Gating mirrors the other grants: `--allow-transcript` off → 403 tagged
+   * `transcript-disabled:`, the same machine-readable prefix convention
+   * `/api/upload` set with `uploads-disabled:` — the prose after the colon may
+   * be reworded, the tag may not, so a client matches on the tag. (A pre-flag
+   * daemon returns no `allowTranscript` field at all, which the phone reads as
+   * false → mirror fallback, without ever seeing this 403.)
+   * A projector the daemon did not wire → 503. `no-binding` and friends are a
+   * 200 body, never a 500 — the phone must distinguish "off" from "broken". */
+  private handleSessionTurns(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    sessionId: string,
+    principal: WebPrincipal,
+  ): void {
+    if (this.opts?.allowTranscript !== true) {
+      this.json(res, 403, {
+        error: 'transcript-disabled: server started without --allow-transcript',
+        detail: 'restart with: wmux web --allow-transcript <your other flags>',
+      });
+      return;
+    }
+    // Unknown pane → 404, the same contract as the other `/api/sessions/:id/*`
+    // routes: a phone that fetched a pane id the daemon no longer owns learns the
+    // pane is gone, not that its conversation is unavailable.
+    if (!this.deps.sessionManager.getSession(sessionId)) {
+      this.json(res, 404, { error: 'session not found' });
+      return;
+    }
+    const projector = this.deps.projector?.() ?? null;
+    if (!projector) {
+      this.json(res, 503, { error: 'transcript projector unavailable' });
+      return;
+    }
+    // #782 — past the gates, this device is reading the pane's turn view, so
+    // the non-recording nudge knows to reach it. Idempotent and never undone: a
+    // device that closes its SSE simply is not in `eventClients` next time, and
+    // a dangling watcher is a cheap no-op rather than a leak.
+    this.noteTranscriptWatcher(sessionId, principal);
+
+    const url = new URL(req.url ?? '/', 'http://localhost');
+    const dir = (url.searchParams.get('dir') ?? 'forward') === 'back' ? 'back' : 'forward';
+    const decoded = decodeTurnCursor(url.searchParams.get('cursor'));
+
+    const status = projector.status(sessionId);
+    if (!status.available) {
+      this.json(res, 200, { available: false, reason: status.reason });
+      return;
+    }
+
+    if (dir === 'back' || !decoded) {
+      // First read (no cursor) or backward paging: a snapshot. The phone pages
+      // BACK from a cursor's head; forward deltas ride the tail.
+      const before = decoded && dir === 'back' ? decoded.head : undefined;
+      const page = projector.snapshot(sessionId, before !== undefined ? { before } : undefined);
+      if (!page) {
+        this.json(res, 200, { available: false, reason: 'unreadable' });
+        return;
+      }
+      this.json(res, 200, {
+        available: true,
+        events: page.events,
+        cursor: encodeTurnCursor(page.cursor),
+        hasMore: page.hasMore,
+        ...(page.truncatedHead ? { truncatedHead: true } : {}),
+      });
+      return;
+    }
+
+    const result = projector.delta(sessionId, decoded.tail, {
+      cursorFileSize: decoded.fileSize,
+    });
+    if (!result) {
+      this.json(res, 200, { available: false, reason: 'unreadable' });
+      return;
+    }
+    this.json(res, 200, {
+      available: true,
+      events: result.events,
+      cursor: encodeTurnCursor(result.cursor),
+      reset: result.reset,
+      ...(result.budgetDropped ? { budgetDropped: true } : {}),
+    });
+  }
+
   private handleSessionResize(
     req: http.IncomingMessage,
     res: http.ServerResponse,
@@ -1877,6 +2058,14 @@ export class WebTerminalServer {
     lifecycle
       .destroy(id)
       .then(() => {
+        // Drop any phone turn-view watcher + pending nudge for this pane so a
+        // closed session does not linger for the daemon's life (3-MODEL review).
+        this.transcriptWatchers.delete(id);
+        const timer = this.transcriptNudgeTimers.get(id);
+        if (timer) {
+          clearTimeout(timer);
+          this.transcriptNudgeTimers.delete(id);
+        }
         res.writeHead(204, this.securityHeaders());
         res.end();
       })
@@ -2509,6 +2698,74 @@ export class WebTerminalServer {
       }
     }
     return entry;
+  }
+
+  /**
+   * #782 — push a transcript nudge to the device(s) watching this pane, WITHOUT
+   * recording it. Recording the nudge would land it in `attentionLog`, where a
+   * busy pane's ~1Hz nudges would evict a pending approval; the phone then
+   * replays the trimmed log on reconnect, re-derives the badge, and finds no
+   * pending event — the badge clears while a human is still being waited on
+   * (CRITICAL 3). Same `/api/events` SSE connection, auth and replay; this just
+   * bypasses the log and `attentionSeq`, so a nudge is a live signal only and
+   * never part of the replayed backlog.
+   *
+   * Coalesced per pane (`TRANSCRIPT_NUDGE_COALESCE_MS`): a turn fires several
+   * hook signals in quick succession and the phone refetches on each nudge, so
+   * collapsing the burst into one fetch is pure win. Delivered ONLY to devices
+   * that opened this pane's turn view — a device that never queried the pane
+   * never asked to hear about it. The nudge carries no payload on purpose: the
+   * phone calls `delta()` and lets the cursor checks (fileSize/boundary)
+   * decide whether to append or re-snapshot, instead of the server guessing.
+   */
+  emitTranscriptNudge(sessionId: string): void {
+    if (this.eventClients.size === 0) return;
+    // 1s coalescing per pane. The FIRST nudge of a burst arms the timer; later
+    // ones in the same window are dropped on purpose (a refetch is already
+    // pending, and the cursor checks on that refetch subsume later writes).
+    if (this.transcriptNudgeTimers.has(sessionId)) return;
+    const timer = setTimeout(() => {
+      this.transcriptNudgeTimers.delete(sessionId);
+      this.deliverTranscriptNudge(sessionId);
+    }, TRANSCRIPT_NUDGE_COALESCE_MS);
+    timer.unref?.();
+    this.transcriptNudgeTimers.set(sessionId, timer);
+  }
+
+  private deliverTranscriptNudge(sessionId: string): void {
+    const watchers = this.transcriptWatchers.get(sessionId);
+    if (!watchers || watchers.size === 0) return;
+    const body = JSON.stringify({ sessionId });
+    for (const client of this.eventClients) {
+      if (!watchers.has(this.watcherKey(client.principal))) continue;
+      try {
+        writeSse(client.res, 'transcript.nudge', body);
+      } catch {
+        /* client stream broken — its own 'close' handler cleans up */
+      }
+    }
+  }
+
+  /** Stable key for a principal in `transcriptWatchers`. */
+  private watcherKey(principal: WebPrincipal): string {
+    return principal.kind === 'operator' ? 'operator' : principal.deviceId;
+  }
+
+  /**
+   * Record that this principal opened the pane's turn view, so the non-recording
+   * nudge reaches it. Called from `handleSessionTurns` on every successful read;
+   * idempotent, and intentionally never undone — a device that stops reading the
+   * pane simply has no SSE open, and a dangling entry is a cheap no-op on the
+   * next nudge (the `eventClients` loop finds no matching client).
+   */
+  private noteTranscriptWatcher(sessionId: string, principal: WebPrincipal): void {
+    const key = this.watcherKey(principal);
+    let set = this.transcriptWatchers.get(sessionId);
+    if (!set) {
+      set = new Set();
+      this.transcriptWatchers.set(sessionId, set);
+    }
+    set.add(key);
   }
 
   /** Drop entries past the cap (oldest first) and anything past the TTL. */

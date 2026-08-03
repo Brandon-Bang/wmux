@@ -217,6 +217,7 @@ function persistWebState(
       host: info.host ?? '127.0.0.1',
       allowInput: info.allowInput === true,
       allowUpload: info.allowUpload === true,
+      allowTranscript: info.allowTranscript === true,
       ...(info.tls === true && tls ? { tls } : {}),
       allowedHosts,
       tailscale,
@@ -292,6 +293,10 @@ async function restoreWebServer(sessionManager: DaemonSessionManager): Promise<v
         // the Playwright sandbox already allowlists, so an uploaded photo is
         // reachable by browser_file_upload without a second policy.
         uploadsDir: path.join(wmuxDir, 'uploads', 'phone'),
+        // #782 — the phone turn view. Lazy: the projector is built after the
+        // first resume binding, so a getter resolves the live instance per
+        // request rather than capturing a null at construction.
+        projector: () => transcriptProjector,
       });
     }
     const info = await webTerminalServer.start({
@@ -299,6 +304,7 @@ async function restoreWebServer(sessionManager: DaemonSessionManager): Promise<v
       host: state.host,
       allowInput: state.allowInput,
       allowUpload: state.allowUpload,
+      allowTranscript: state.allowTranscript,
       ...(state.tls ? { tls: state.tls } : {}),
       allowedHosts: state.allowedHosts,
       // Replayed, not re-established: the serve registration lives with the
@@ -2300,6 +2306,8 @@ function registerRpcHandlers(
       ...(approvalRegistry ? { approvals: approvalRegistry } : {}),
       // See the restore path for why this directory and not another.
       uploadsDir: path.join(wmuxDir, 'uploads', 'phone'),
+      // See the restore path: lazy projector for the phone turn view (#782).
+      projector: () => transcriptProjector,
     });
   }
   const webServer = webTerminalServer;
@@ -2315,6 +2323,7 @@ function registerRpcHandlers(
       host?: string;
       allowInput?: boolean;
       allowUpload?: boolean;
+      allowTranscript?: boolean;
       allowedHosts?: unknown;
       newToken?: boolean;
       tailscale?: boolean;
@@ -2329,6 +2338,8 @@ function registerRpcHandlers(
     // Separate opt-in from `allowInput`, and fail-closed the same way: a caller
     // that says nothing gets a server that cannot write files.
     const allowUpload = p.allowUpload === true;
+    // Its own opt-in like upload, fail-closed when the caller says nothing.
+    const allowTranscript = p.allowTranscript === true;
     // Extra Host-header names for reverse-proxy fronts (`tailscale serve`
     // forwards the MagicDNS name). Strings only; anything else is dropped.
     const allowedHosts = Array.isArray(p.allowedHosts)
@@ -2351,6 +2362,7 @@ function registerRpcHandlers(
       host,
       allowInput,
       allowUpload,
+      allowTranscript,
       allowedHosts,
       tailscale,
       ...(tls ? { tls } : {}),
@@ -2607,6 +2619,9 @@ function registerRpcHandlers(
       // cwd→slug derivation (agentResume.ts rejects that mapping as
       // version-drift-prone, which is why the path is persisted at all).
       getResumeBinding: (id) => sessionManager.getSession(id)?.meta.resumeBinding,
+      // #782 — splits an absent binding into `stale-session` (agent running, no
+      // binding yet) vs `no-hook` (no agent detected → hooks not installed).
+      getDetectedAgent: (id) => sessionManager.getSession(id)?.meta.lastDetectedAgent,
       // Only the transcript-path containment check reads this — a workspace
       // profile may relocate CLAUDE_CONFIG_DIR per pane.
       getSessionEnv: (id) => sessionManager.getSession(id)?.meta.env,
@@ -2752,7 +2767,14 @@ function registerRpcHandlers(
       // Chat View P1 — the tail nudge rides the existing hook signals rather
       // than a new hook. Fired for every resolved kind; a no-op for panes with
       // no Chat surface open.
-      onTranscriptNudge: (sessionId, kind, agentSessionId) => projector.nudge(sessionId, kind, agentSessionId),
+      onTranscriptNudge: (sessionId, kind, agentSessionId) => {
+        projector.nudge(sessionId, kind, agentSessionId);
+        // #782 — phone turn-view nudge. Non-recording: bypasses attentionLog so
+        // a busy pane cannot evict a pending approval and blank the badge on
+        // replay (CRITICAL 3). Delivered only to devices watching this pane; a
+        // no-op until one opens it, and harmless when the web server is off.
+        webTerminalServer?.emitTranscriptNudge(sessionId);
+      },
     });
   }
   const ingest = hookIngest;

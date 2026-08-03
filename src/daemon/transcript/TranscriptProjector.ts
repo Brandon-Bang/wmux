@@ -141,9 +141,12 @@ export class TranscriptProjector {
   /**
    * Is Chat View available for this pane, and if not, WHY. The reasons are
    * distinct because the UI says something different for each: an agent that
-   * publishes no transcript is a permanent no, while `no-transcript-path` just
-   * means the first turn has not ended yet (SessionStart fires before the
-   * `.jsonl` exists and carries no path — only the first Stop fills it in).
+   * publishes no transcript is a permanent no (`not-claude`), while
+   * `no-transcript-path` just means the first turn has not ended yet
+   * (SessionStart fires before the `.jsonl` exists and carries no path — only
+   * the first Stop fills it in). An absent binding splits into `no-hook` (no
+   * agent detected — install the hooks) vs `stale-session` (an agent is running
+   * but the binding has not landed yet).
    */
   status(sessionId: string): TranscriptStatus {
     const resolved = this.resolvePath(sessionId);
@@ -188,6 +191,64 @@ export class TranscriptProjector {
       return { ...page, events: [] };
     }
     return page;
+  }
+
+  /**
+   * Forward delta the phone reads after its snapshot. STATELESS by contract
+   * (#782): unlike `subscribe()`, this never touches the shared `WatchState`,
+   * because a late subscriber's force-reset would scramble every desktop Chat
+   * View row that shares the session. The phone passes back the cursor it
+   * received so a replaced/truncated transcript is answered with a reset
+   * snapshot instead of bytes stitched from a different conversation.
+   *
+   * Reset detection is WEAKER than `readAndEmit`'s, which compares the inode: a
+   * wire cursor cannot carry inode without depending on FS-specific ino
+   * stability (NFS etc.), so this path has exactly two signals — a fileSize
+   * SHRINK, and `fromOffset` no longer landing on a line boundary. mtime is
+   * deliberately NOT one of them: it moves on every append, so any mtime test
+   * would reset on every turn and make the forward delta dead code. A rewrite
+   * that grows past the cursor AND happens to leave a `\n` at exactly
+   * `fromOffset` is therefore undetected (plan D1: an accepted, narrow
+   * detection regression).
+   *
+   * `budgetDropped` is surfaced so the phone can render an "omitted" seam
+   * instead of the silent hole `fit` left the push path with. */
+  delta(
+    sessionId: string,
+    fromOffset: number,
+    opts?: { cursorFileSize?: number },
+  ): { events: TurnEvent[]; cursor: TranscriptPage['cursor']; reset: boolean; budgetDropped?: boolean } | null {
+    const resolved = this.resolvePath(sessionId);
+    if (!resolved.ok) return null;
+    const stat = statTranscript(resolved.transcriptPath);
+    if (!stat) return null;
+
+    let reset = false;
+    // A SHRINK (size < cursor) means the file was truncated/rewritten. A grow
+    // is a normal append. Rotation past the cursor is caught by isLineBoundary
+    // below (review: Claude+Codex 2-MODEL).
+    if (opts?.cursorFileSize !== undefined && stat.size < opts.cursorFileSize) reset = true;
+    if (fromOffset > 0 && !isLineBoundary(resolved.transcriptPath, fromOffset)) reset = true;
+    // A shrunk file (stat.size < from) is readTranscriptDelta's own reset path.
+
+    if (reset) {
+      const page = this.snapshot(sessionId);
+      if (!page) return null;
+      return { events: page.events, cursor: page.cursor, reset: true };
+    }
+
+    const { result, budgetDropped } = this.fitWithReceipt((maxBytes) => {
+      const d = readTranscriptDelta(resolved.transcriptPath, fromOffset, maxBytes);
+      return d && { events: d.events, cursor: d.cursor, ...(d.reset ? { reset: true } : {}) };
+    });
+    if (!result) return null;
+    const r = result as { events: TurnEvent[]; cursor: TranscriptPage['cursor']; reset?: boolean };
+    return {
+      events: r.events,
+      cursor: r.cursor,
+      reset: r.reset === true,
+      ...(budgetDropped ? { budgetDropped: true } : {}),
+    };
   }
 
   /**
@@ -353,9 +414,16 @@ export class TranscriptProjector {
     if (!Number.isFinite(req.srcOffset) || req.srcOffset < 0) return null;
     if (!Number.isFinite(req.n) || req.n < 1) return null;
 
-    const line = readTranscriptLineAt(resolved.transcriptPath, Math.floor(req.srcOffset));
+    const offset = Math.floor(req.srcOffset);
+    // #782 — readTranscriptLineAt reads at an arbitrary offset with no boundary
+    // check, so a stale or hostile offset would slice the MIDDLE of an unrelated
+    // entry and serve it as this block's body. A ref minted by this projector is
+    // always a line start, but the ref crossed the wire from a client; verify
+    // before reading and refuse (empty body) when the offset is mid-line.
+    if (offset > 0 && !isLineBoundary(resolved.transcriptPath, offset)) return null;
+    const line = readTranscriptLineAt(resolved.transcriptPath, offset);
     if (line === null) return null;
-    const parsed = parseTranscriptLineDetailed(line, Math.floor(req.srcOffset));
+    const parsed = parseTranscriptLineDetailed(line, offset);
 
     if (req.eventId) {
       // The file may have rotated since the ref was minted; without this check
@@ -403,9 +471,9 @@ export class TranscriptProjector {
     try {
       binding = this.deps.getResumeBinding(sessionId);
     } catch {
-      return { ok: false, reason: 'no-binding' };
+      return { ok: false, reason: this.absentBindingReason(sessionId) };
     }
-    if (!binding) return { ok: false, reason: 'no-binding' };
+    if (!binding) return { ok: false, reason: this.absentBindingReason(sessionId) };
     if (binding.agent !== SUPPORTED_AGENT) return { ok: false, reason: 'not-claude' };
     if (!binding.transcriptPath) return { ok: false, reason: 'no-transcript-path' };
     // The containment guard belongs HERE, at the single point every read goes
@@ -433,6 +501,18 @@ export class TranscriptProjector {
       transcriptPath: binding.transcriptPath,
       agentSessionId: binding.sessionId,
     };
+  }
+
+  /**
+   * Split the old catch-all `no-binding` into the two cases the phone surfaces
+   * differently: an agent IS running but no binding was captured (`stale-session`
+   * — the session started before the hooks were armed, or its first Stop has not
+   * landed yet, so the binding will appear) vs no agent detected at all (`no-hook`
+   * — the wmux hooks are not installed here, and `wmux setup-hooks` is the fix).
+   * Without a detector wired this degrades to `no-hook`, the pre-split behaviour.
+   */
+  private absentBindingReason(sessionId: string): string {
+    return this.deps.getDetectedAgent?.(sessionId) ? 'stale-session' : 'no-hook';
   }
 
   /**
@@ -670,8 +750,15 @@ export class TranscriptProjector {
    * A3 in one place: halve the read window until the serialized events fit the
    * budget. Reading less is always safe — the cursor reflects exactly what was
    * consumed, so the remainder arrives on the next nudge or watch event.
+   *
+   * `fitWithReceipt` also reports `budgetDropped` when a single entry exceeds
+   * the budget (cursor advances with no rows). The stateless delta path (#782)
+   * surfaces that to the phone so it can render an "omitted" seam instead of a
+   * silent hole; the push-path `fit` wrapper keeps its old null-or-T contract.
    */
-  private fit<T extends { events: TurnEvent[] }>(read: (maxBytes: number) => T | null): T | null {
+  private fitWithReceipt<T extends { events: TurnEvent[] }>(
+    read: (maxBytes: number) => T | null,
+  ): { result: T | null; budgetDropped: boolean } {
     let maxBytes = TAIL_BYTES;
     let result = read(maxBytes);
     while (result && maxBytes > MIN_READ_BYTES && !withinBudget(result.events)) {
@@ -682,9 +769,13 @@ export class TranscriptProjector {
       // A single entry over the budget. Advance the cursor with no rows rather
       // than risk main's control buffer; the row is lost, the stream is not.
       this.deps.log?.('warn', '[transcript] one entry exceeded the byte budget and was skipped');
-      return { ...result, events: [] };
+      return { result: { ...result, events: [] }, budgetDropped: true };
     }
-    return result;
+    return { result, budgetDropped: false };
+  }
+
+  private fit<T extends { events: TurnEvent[] }>(read: (maxBytes: number) => T | null): T | null {
+    return this.fitWithReceipt(read).result;
   }
 
   private disarmWatch(state: WatchState): void {

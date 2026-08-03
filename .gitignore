@@ -129,9 +129,13 @@ core/harness/esctest/vendor/
 HANDOFF-*.md
 .workflow/
 
-# Local runtime + generated state (never commit). `plans/` is deliberately NOT
-# here: design and execution documents are tracked so a new session can read
-# the decisions behind the code instead of re-deriving them.
+# Local working notes (never commit). `plans/` used to be tracked so a new
+# session could read the decisions behind the code; it now stays local because
+# the directory also collected positioning notes that do not belong in a
+# public repository.
+plans/
+
+# Local runtime + generated state (never commit).
 .tokensave/
 .wmux/
 semantic-review/

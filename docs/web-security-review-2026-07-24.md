@@ -1,6 +1,7 @@
 # wmux web — Security Review & Remediation Plan (2026-07-24)
 
-> **Status:** Review complete. No code changed. Owner decision pending on scope/phasing.
+> **Status:** Review complete. Remediation status updated through #764; detailed
+> finding text below records the original review state.
 > **Scope:** The `wmux web` browser/PWA terminal surface only — the HTTP+SSE server
 > inside the daemon, its CLI command, the main↔renderer IPC, and the bundled frontend.
 > **Sources reviewed:** `src/daemon/web/WebTerminalServer.ts`, `src/daemon/web/__tests__/WebTerminalServer.test.ts`,
@@ -68,7 +69,7 @@ Boundary strengths already in place (no action needed):
 
 | ID | Severity | Finding | Location | Status |
 |---|---|---|---|---|
-| W1 | **Medium** | `--expose` sends the token + full scrollback in cleartext over HTTP; warning understates sniffing risk | `WebTerminalServer.ts:131` (no TLS), `web.ts:96-109` (warning) | ⏳ Open — [#607](https://github.com/openwong2kim/wmux/issues/607) (Tier A wording NOT yet shipped — doc overstated; TLS is follow-up) |
+| W1 | **Medium** | Bare `--expose` sends the token + full scrollback in cleartext over HTTP | `WebTerminalServer.ts`, `web.ts` | 🟡 Mitigated — explicit warning shipped via [#607](https://github.com/openwong2kim/wmux/issues/607); native `--tls-cert`/`--tls-key` added via [#764](https://github.com/openwong2kim/wmux/issues/764); bare `--expose` remains plaintext by design |
 | W2 | **Medium** | No frame protection → authenticated localhost page is clickjackable (worse with `--allow-input`) | `WebTerminalServer.ts:517` (`serveStatic`) | ✅ Resolved — `securityHeaders()` on every response |
 | W3 | **Low-Med** | No `Host` header validation → DNS rebinding can reach unauthenticated `/api/pair` and burn it (pairing DoS) | `WebTerminalServer.ts:238` | ✅ Resolved — Host allowlist checked before routing |
 | W4 | **Low** | No `Content-Security-Policy`; an XSS (future regression) would exfiltrate the token freely | `index.html` / `serveStatic` | ✅ Resolved — [#608](https://github.com/openwong2kim/wmux/issues/608): full policy on `GET /` with per-build inline-script hashes, `connect-src 'self'` |
@@ -287,15 +288,14 @@ regen-on-demand option) rather than none; or, after N wrong attempts from one fa
 
 | Phase | Items | Effort | Risk reduced | Status |
 |---|---|---|---|---|
-| **P1 — ship now** | W2 (frame + nosniff + referrer) + W1 Tier A (wording) | ~1 h | Clickjacking; operator misuse of `--expose` | ◐ W2 shipped only; W1 Tier A tracked in [#607](https://github.com/openwong2kim/wmux/issues/607) |
+| **P1 — ship now** | W2 (frame + nosniff + referrer) + W1 Tier A (wording) | ~1 h | Clickjacking; operator misuse of `--expose` | ✅ Shipped ([#607](https://github.com/openwong2kim/wmux/issues/607)) |
 | **P2 — next PR** | W3 (Host allowlist) + W5 (pairing regen/rate-limit) | ~3 h | DNS-rebinding DoS; pairing DoS | ✅ Shipped in this PR |
 | **P3 — hardening** | W4 (full hashed CSP; hashes computed server-side from the served bytes, not in the build script) | ~0.5 day | Containment under future XSS | ✅ Shipped ([#608](https://github.com/openwong2kim/wmux/issues/608)) |
-| **P4 — optional** | W1 Tier C (native TLS or `tailscale serve` wrapper) | larger | Removes cleartext risk instead of warning | ⏳ Follow-up |
+| **P4 — optional** | W1 Tier C (native TLS or `tailscale serve` wrapper) | larger | Removes cleartext risk instead of warning | ✅ Native TLS implemented ([#764](https://github.com/openwong2kim/wmux/issues/764)) |
 
-P1 + P2 (both shipped) bring the web surface up to the same localhost-service baseline
-that Docker/VS Code/Electron ship, at negligible cost and no behavior change for
-legitimate users. Remaining work is P3 (full CSP) and P4 (TLS) before any default-on
-exposure path.
+P1–P4 mitigation work is implemented. W1 remains an operator-selected risk on bare
+`--expose`; the default remains loopback-only and read-only, and network exposure
+still requires an explicit operator choice.
 
 ---
 
@@ -316,12 +316,9 @@ already in the test file.
 
 ---
 
-## 6. Documentation follow-up
+## 6. Documentation follow-up (complete)
 
-`docs/SECURITY.md` §1 does not yet declare the **web server** as a trust boundary. After
-P1–P2 land, add a §1.5 "Browser/PWA terminal server" subsection mirroring the shape of
-§1.2 (Named Pipe auth): state the per-start UUID token model, the loopback/expose split,
-the read-only-by-default guarantee, and explicitly defer network confidentiality to the
-operator's TLS/Tailscale layer (consistent with §2's "Network confidentiality" row). This
-keeps the security model document complete and gives reviewers the boundary declaration
-they currently have to infer from code.
+`docs/SECURITY.md` §1.5 now declares the **Browser/PWA terminal server** as a trust
+boundary. It records the credential model, loopback/expose split, read-only default,
+separate input/upload grants, and the three confidentiality postures: native TLS,
+Tailscale HTTPS, and explicitly warned plaintext binding.

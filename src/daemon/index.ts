@@ -9,13 +9,16 @@ import { SessionPipe } from './SessionPipe';
 import { WebTerminalServer } from './web/WebTerminalServer';
 import type { WebTerminalInfo, WebSessionLifecycle } from './web/WebTerminalServer';
 import {
-  loadWebState,
+  loadWebStateWithDiagnostics,
   saveWebState,
   clearWebState,
   getWebStatePath,
+  coerceWebTlsConfig,
 } from './web/webStateStore';
 import { stopWebServerDurably } from './web/webStop';
+import { decideWebStartPolicy } from './web/webStartPolicy';
 import { scheduleTokenFileReHarden } from '../shared/security';
+import type { WebTlsConfig } from '../shared/web';
 import { generateSnapshot, generateSnapshotUnqueued, enqueueSnapshotJob, generateTextSnapshot, capTextRowsToFrameBudget, MAX_SCROLLBACK } from './HeadlessSnapshot';
 import { StateWriter, scrubPersistedCredentials } from './StateWriter';
 import { stripCredentialValues } from '../shared/envFilter';
@@ -70,7 +73,7 @@ import { TranscriptDiscovery, DISCOVERABLE_AGENT } from './transcript/Transcript
 import { PushSender } from './push/PushSender';
 import { approvalPushCollapseId, buildApprovalPushPayload } from './push/approvalPushPayload';
 import { ApprovalRegistry } from './approvals/ApprovalRegistry';
-import { DeviceStore } from './web/DeviceStore';
+import { DeviceStore, type DeviceBatchRevocationCause } from './web/DeviceStore';
 import { revokeDeviceAndDisconnect } from './web/deviceRevoke';
 import { buildWebPaneEnv } from './web/webPaneEnv';
 import type { ApprovalDecision } from './approvals/types';
@@ -117,6 +120,16 @@ function getDeviceStore(): DeviceStore {
     deviceStore = new DeviceStore({ wmuxDir, log: (level, msg) => log(level, msg) });
   }
   return deviceStore;
+}
+
+/** Revoke the durable roster and cut every live capability for those devices. */
+function revokeAllWebDevices(
+  server: WebTerminalServer,
+  cause: DeviceBatchRevocationCause,
+): boolean {
+  const revocation = getDeviceStore().revokeAll(cause);
+  for (const deviceId of revocation.revoked) server.disconnectDevice(deviceId);
+  return revocation.ok;
 }
 
 // M2 — approval registry. Module-scoped for the same reason as the two above:
@@ -182,14 +195,20 @@ let webRestore: Promise<void> | null = null;
 
 /**
  * Record the running server's exact shape so the next daemon can reproduce it
- * (#596). Best-effort by design: the operator's start already succeeded, so a
- * write failure is logged rather than surfaced as a failed start. The store
- * neutralises best-effort, but an older locked record can remain when the
- * filesystem refuses every write and delete.
+ * (#596). Best-effort by default: an ordinary operator start already
+ * succeeded, so a write failure is logged rather than surfaced as a failed
+ * start. Callers that rotate credentials use the boolean result to require
+ * durability instead. The store neutralises best-effort, but an older locked
+ * record can remain when the filesystem refuses every write and delete.
  */
-function persistWebState(info: WebTerminalInfo, allowedHosts: string[], tailscale: boolean): void {
-  if (!info.running || !info.token) return;
-  saveWebState(
+function persistWebState(
+  info: WebTerminalInfo,
+  allowedHosts: string[],
+  tailscale: boolean,
+  tls?: WebTlsConfig,
+): boolean {
+  if (!info.running || !info.token) return false;
+  return saveWebState(
     wmuxDir,
     {
       version: 1,
@@ -198,6 +217,7 @@ function persistWebState(info: WebTerminalInfo, allowedHosts: string[], tailscal
       host: info.host ?? '127.0.0.1',
       allowInput: info.allowInput === true,
       allowUpload: info.allowUpload === true,
+      ...(info.tls === true && tls ? { tls } : {}),
       allowedHosts,
       tailscale,
       token: info.token,
@@ -209,6 +229,17 @@ function persistWebState(info: WebTerminalInfo, allowedHosts: string[], tailscal
         error,
       ),
   );
+}
+
+/** Validate the same-user control-pipe payload without ever downgrading it. */
+function parseWebTlsConfig(value: unknown): WebTlsConfig | false | undefined {
+  if (value === undefined) return undefined;
+  if (value === false) return false;
+  const tls = coerceWebTlsConfig(value);
+  if (!tls) {
+    throw new Error('native TLS requires absolute certPath and keyPath values');
+  }
+  return tls;
 }
 
 /**
@@ -223,7 +254,14 @@ function persistWebState(info: WebTerminalInfo, allowedHosts: string[], tailscal
  * delay the daemon's primary job, and never throws for the same reason.
  */
 async function restoreWebServer(sessionManager: DaemonSessionManager): Promise<void> {
-  const state = loadWebState(wmuxDir);
+  const loaded = loadWebStateWithDiagnostics(wmuxDir);
+  const state = loaded.state;
+  if (loaded.transportInvalid) {
+    log(
+      'warn',
+      '[web] persisted transport configuration is invalid; automatic restore remains disabled',
+    );
+  }
   if (!state.enabled) return;
 
   // This is an existing credential whose prior exposure window was already
@@ -261,6 +299,7 @@ async function restoreWebServer(sessionManager: DaemonSessionManager): Promise<v
       host: state.host,
       allowInput: state.allowInput,
       allowUpload: state.allowUpload,
+      ...(state.tls ? { tls: state.tls } : {}),
       allowedHosts: state.allowedHosts,
       // Replayed, not re-established: the serve registration lives with the
       // main process and tailscaled keeps it across reboots on its own. All
@@ -279,9 +318,10 @@ async function restoreWebServer(sessionManager: DaemonSessionManager): Promise<v
       info.port !== state.port ||
       info.host !== state.host ||
       info.allowInput !== state.allowInput ||
+      info.tls !== (state.tls !== undefined) ||
       info.token !== state.token
     ) {
-      persistWebState(info, state.allowedHosts, state.tailscale);
+      persistWebState(info, state.allowedHosts, state.tailscale, state.tls);
     }
     // A restore that puts a WRITABLE terminal back on every network interface
     // happens with nobody at the desktop, so it is logged at warn: the operator
@@ -290,7 +330,7 @@ async function restoreWebServer(sessionManager: DaemonSessionManager): Promise<v
     const exposed = info.host === '0.0.0.0' || info.host === '::';
     log(
       exposed && info.allowInput ? 'warn' : 'info',
-      `[web] restored on ${info.host}:${info.port} (input ${info.allowInput ? 'ENABLED' : 'read-only'}, ${exposed ? 'ALL interfaces' : 'loopback'}) — replaying the operator's earlier \`wmux web\`. Turn it off with \`wmux web --stop\`.`,
+      `[web] restored ${info.tls ? 'HTTPS' : 'HTTP'} on ${info.host}:${info.port} (input ${info.allowInput ? 'ENABLED' : 'read-only'}, ${exposed ? 'ALL interfaces' : 'loopback'}) — replaying the operator's earlier \`wmux web\`. Turn it off with \`wmux web --stop\`.`,
     );
   } catch (err) {
     // EADDRINUSE (a stale holder of the port), a missing assets dir, anything:
@@ -2278,6 +2318,7 @@ function registerRpcHandlers(
       allowedHosts?: unknown;
       newToken?: boolean;
       tailscale?: boolean;
+      tls?: unknown;
     };
     const port =
       typeof p.port === 'number' && p.port > 0 && p.port < 65536 ? Math.floor(p.port) : 7681;
@@ -2293,38 +2334,18 @@ function registerRpcHandlers(
     const allowedHosts = Array.isArray(p.allowedHosts)
       ? p.allowedHosts.filter((h): h is string => typeof h === 'string')
       : [];
-    // #596: carry the previous token forward so a re-start (adding
-    // --allow-host, flipping --allow-input) does not lock out a phone that
-    // already paired. The token comes from OUR 0600 state file, never from
-    // these params — a pipe client must not get to choose it. `--new-token`
-    // is the deliberate rotation escape hatch (revoke every paired device).
-    const previous = loadWebState(wmuxDir);
-    const token = p.newToken === true ? undefined : previous.token || undefined;
-    if (p.newToken === true) {
-      // Rotation has to take the PAIRED DEVICES with it, not just the operator
-      // token. Before per-device credentials that was automatic — every phone
-      // held the operator token — but a device now authenticates on its own
-      // `deviceId.secret`, which a new operator token does not touch. Without
-      // this the CLI's own help ("revoking every device already paired") would
-      // be false and the operator would stop worrying about a phone that still
-      // works.
-      //
-      // Roster FIRST, then cut the streams: an established SSE never
-      // re-authenticates, so revoking alone would leave a revoked phone
-      // watching panes on the connection it already holds.
-      const revocation = getDeviceStore().revokeAll();
-      for (const deviceId of revocation.revoked) webServer.disconnectDevice(deviceId);
-      if (!revocation.ok) {
-        // Fail the rotation rather than report a half-done one. The devices are
-        // blocked in this process, but a restart would bring them back and the
-        // operator would never know.
-        throw new Error(
-          'the operator token was not rotated: the device roster could not be written, ' +
-            'so the paired devices could not be durably revoked',
-        );
-      }
-    }
+    const requestedTls = parseWebTlsConfig(p.tls);
     const tailscale = p.tailscale === true;
+    const loadedPrevious = loadWebStateWithDiagnostics(wmuxDir);
+    const { tls, token, rotateCredentials } = decideWebStartPolicy({
+      requestedTls,
+      live: webServer.currentStartState,
+      previous: loadedPrevious.state,
+      previousTransportInvalid: loadedPrevious.transportInvalid,
+      host,
+      tailscale,
+      newToken: p.newToken === true,
+    });
     const info = await webServer.start({
       port,
       host,
@@ -2332,21 +2353,58 @@ function registerRpcHandlers(
       allowUpload,
       allowedHosts,
       tailscale,
+      ...(tls ? { tls } : {}),
       token,
     });
-    persistWebState(info, allowedHosts, tailscale);
+    if (rotateCredentials) {
+      // A device authenticates with its own durable `deviceId.secret`, so
+      // rotating only the operator token is not a credential rotation. Do
+      // this after start validated and bound the new transport but before the
+      // event loop can serve a request or the RPC can expose its fresh token.
+      // start() also closed every old stream; disconnectDevice clears any
+      // remaining device-bound tickets defensively.
+      const revocationCause = p.newToken === true ? 'token-rotation' : 'transport-change';
+      if (!revokeAllWebDevices(webServer, revocationCause)) {
+        // Fail closed: in-memory revocation already blocks the devices, but a
+        // restart could reload the old roster. Do not leave the new listener
+        // running or claim that the boundary rotation succeeded.
+        await webServer.stop();
+        throw new Error(
+          'web credentials were not rotated: the device roster could not be written, ' +
+            'so the paired devices could not be durably revoked',
+        );
+      }
+    }
+    const statePersisted = persistWebState(info, allowedHosts, tailscale, tls);
+    if (rotateCredentials && !statePersisted) {
+      // A successful-looking rotation with an older locked record still on
+      // disk could resurrect the old operator token after a restart. Match the
+      // roster's fail-closed contract: leave no new listener and report that
+      // durability, not transport setup, was the failed step.
+      await webServer.stop();
+      throw new Error(
+        'web credentials were rotated in memory, but the new web state could not be durably persisted',
+      );
+    }
     return info;
   });
   pipeServer.onRpc('daemon.web.stop', async () => {
-    // Operator-initiated stop = "do not bring this back", and it revokes the
-    // token with it. Distinct from the stop() inside shutdown(), which is a
-    // teardown of a server the operator still wants and therefore leaves the
-    // persisted state alone.
+    // Operator-initiated stop = "do not bring this back", and it revokes every
+    // web credential with it. Distinct from stop() inside shutdown(), which is
+    // a teardown of a server the operator still wants and therefore preserves
+    // both the persisted listener and its paired devices.
     await afterRestore();
-    return stopWebServerDurably(
+    const devicesRevoked = revokeAllWebDevices(webServer, 'operator-stop');
+    const result = await stopWebServerDurably(
       () => clearWebState(wmuxDir),
       () => webServer.stop(),
     );
+    if (!devicesRevoked) {
+      throw new Error(
+        'the web server was stopped, but paired devices could not be durably revoked',
+      );
+    }
+    return result;
   });
   pipeServer.onRpc('daemon.web.status', async () => {
     // Without this a status() called during boot would report `running:false`

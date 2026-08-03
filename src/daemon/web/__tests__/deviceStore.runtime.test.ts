@@ -483,6 +483,7 @@ describe('DeviceStore — revocation durability', () => {
     // First attempt: blocked in memory, honest about the disk.
     expect(s.revoke(d.deviceId)).toEqual({ ok: false, reason: 'persist-failed' });
     expect(s.resolve(d.deviceId, d.deviceSecret)).toMatchObject({ ok: false, reason: 'revoked' });
+    expect(new DeviceAuditLog(dir).read().filter((entry) => entry.event === 'revoke')).toEqual([]);
 
     // The retry used to take the "already revoked" shortcut and answer ok:true
     // about a tombstone that only existed in memory.
@@ -495,10 +496,14 @@ describe('DeviceStore — revocation durability', () => {
       ok: false,
       reason: 'revoked',
     });
+    const revocations = new DeviceAuditLog(dir)
+      .read()
+      .filter((entry) => entry.event === 'revoke');
+    expect(revocations).toMatchObject([{ deviceId: d.deviceId, name: 'Phone' }]);
   });
 });
 
-describe('DeviceStore — revokeAll (token rotation)', () => {
+describe('DeviceStore — revokeAll', () => {
   it('revokes every active device and survives a restart', async () => {
     const s = store();
     const a = await s.mint({ name: 'Phone' });
@@ -517,6 +522,42 @@ describe('DeviceStore — revokeAll (token rotation)', () => {
   it('is idempotent and reports nothing to revoke on an empty roster', () => {
     const s = store();
     expect(s.revokeAll()).toEqual({ ok: true, revoked: [] });
+  });
+
+  it.each(['token-rotation', 'transport-change', 'operator-stop'] as const)(
+    'records %s as the batch revocation cause',
+    async (cause) => {
+      const s = store();
+      const d = await s.mint({ name: 'Phone' });
+
+      expect(s.revokeAll(cause)).toMatchObject({ ok: true, revoked: [d.deviceId] });
+      const revocations = new DeviceAuditLog(dir)
+        .read()
+        .filter((entry) => entry.event === 'revoke');
+      expect(revocations).toMatchObject([{ deviceId: d.deviceId, reason: cause }]);
+    },
+  );
+
+  it('preserves the batch cause until a failed write is retried successfully', async () => {
+    const s = store();
+    const d = await s.mint({ name: 'Phone' });
+    breakWrites();
+
+    expect(s.revokeAll('transport-change')).toMatchObject({
+      ok: false,
+      revoked: [d.deviceId],
+      reason: 'persist-failed',
+    });
+    expect(new DeviceAuditLog(dir).read().filter((entry) => entry.event === 'revoke')).toEqual([]);
+
+    fs.rmSync(getDeviceStatePath(dir), { recursive: true, force: true });
+    expect(s.revokeAll('operator-stop')).toEqual({ ok: true, revoked: [] });
+    const revocations = new DeviceAuditLog(dir)
+      .read()
+      .filter((entry) => entry.event === 'revoke');
+    expect(revocations).toMatchObject([
+      { deviceId: d.deviceId, reason: 'transport-change' },
+    ]);
   });
 
   it('fails closed when the roster cannot be written', async () => {

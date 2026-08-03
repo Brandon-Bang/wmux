@@ -13,9 +13,11 @@ vi.mock('../../../shared/security', () => ({
 
 import {
   loadWebState,
+  loadWebStateWithDiagnostics,
   saveWebState,
   clearWebState,
   coerceWebState,
+  coerceWebStateWithDiagnostics,
   getWebStatePath,
   WEB_STATE_DISABLED,
   type WebPersistedState,
@@ -61,6 +63,23 @@ describe('webStateStore (#596 — wmux web survives a daemon restart)', () => {
   it('round-trips the full operator decision, options included', () => {
     expect(saveWebState(dir, enabled())).toBe(true);
     expect(loadWebState(dir)).toEqual(enabled());
+  });
+
+  it('round-trips native TLS paths without persisting private-key bytes', () => {
+    const certPath = path.join(dir, 'certificate.pem');
+    const keyPath = path.join(dir, 'private-key.pem');
+    const privateKeyMarker = 'PRIVATE-KEY-MATERIAL-MUST-NOT-ENTER-STATE';
+    fs.writeFileSync(certPath, 'certificate material', 'utf8');
+    fs.writeFileSync(keyPath, privateKeyMarker, 'utf8');
+    const state = enabled({
+      tls: { certPath, keyPath },
+      allowedHosts: ['box.example.test'],
+    });
+
+    expect(saveWebState(dir, state)).toBe(true);
+    expect(loadWebState(dir)).toEqual(state);
+    const raw = fs.readFileSync(getWebStatePath(dir), 'utf8');
+    expect(raw).not.toContain(privateKeyMarker);
   });
 
   it('hardens a disabled inode before either create or overwrite receives the token', () => {
@@ -219,6 +238,50 @@ describe('webStateStore (#596 — wmux web survives a daemon restart)', () => {
   it('enabled must be literally true — fail-closed on a truthy impostor', () => {
     expect(coerceWebState({ ...enabled(), enabled: 'yes' }).enabled).toBe(false);
     expect(coerceWebState({ ...enabled(), enabled: 1 }).enabled).toBe(false);
+  });
+
+  it('keeps a pre-TLS state enabled as plaintext for backward compatibility', () => {
+    const loaded = coerceWebStateWithDiagnostics(enabled());
+    expect(loaded.state.enabled).toBe(true);
+    expect(loaded.state.tls).toBeUndefined();
+    expect(loaded.transportInvalid).toBe(false);
+  });
+
+  it.each([
+    null,
+    {},
+    { certPath: 'relative-cert.pem', keyPath: 'relative-key.pem' },
+    { certPath: path.resolve('certificate.pem') },
+    { keyPath: path.resolve('private-key.pem') },
+  ])('disables restore for malformed TLS state instead of downgrading to HTTP (%j)', (tls) => {
+    const loaded = coerceWebStateWithDiagnostics({ ...enabled(), tls });
+    expect(loaded.state.enabled).toBe(false);
+    expect(loaded.state.tls).toBeUndefined();
+    expect(loaded.transportInvalid).toBe(true);
+  });
+
+  it('disables the unsupported native-TLS plus Tailscale combination', () => {
+    const loaded = coerceWebStateWithDiagnostics({
+      ...enabled(),
+      tailscale: true,
+      tls: {
+        certPath: path.join(dir, 'certificate.pem'),
+        keyPath: path.join(dir, 'private-key.pem'),
+      },
+    });
+    expect(loaded.state.enabled).toBe(false);
+    expect(loaded.transportInvalid).toBe(true);
+  });
+
+  it('retains invalid-transport diagnostics when loading from disk', () => {
+    fs.writeFileSync(
+      getWebStatePath(dir),
+      JSON.stringify({ ...enabled(), tls: { certPath: 'relative.pem' } }),
+      'utf8',
+    );
+    const loaded = loadWebStateWithDiagnostics(dir);
+    expect(loaded.state.enabled).toBe(false);
+    expect(loaded.transportInvalid).toBe(true);
   });
 
   it('coerces per-field: one bad value never discards the rest', () => {

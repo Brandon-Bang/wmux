@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { secureWriteTokenFile } from '../../shared/security';
+import type { WebTlsConfig } from '../../shared/web';
 
 /**
  * Durable record of the operator's "yes, serve this" for `wmux web` (#596).
@@ -40,6 +41,8 @@ export interface WebPersistedState {
    * a restored server never gains a permission the operator did not ask for.
    */
   allowUpload: boolean;
+  /** Native HTTPS PEM paths. Key bytes are never persisted here. */
+  tls?: WebTlsConfig;
   allowedHosts: string[];
   /**
    * Whether the operator asked for a `tailscale serve` front.
@@ -59,13 +62,21 @@ export interface WebPersistedState {
    * Restoring the listener without this would be worse than the honest
    * failure it replaces.
    *
-   * Lifetime: minted on the first start, reused across restarts AND across
-   * operator re-starts (so `wmux web --allow-host …` no longer locks out a
-   * paired phone), and destroyed on an explicit `wmux web --stop` or
-   * `wmux web --new-token`. The pairing code is deliberately NOT persisted —
-   * it is short-lived and single-use by design, so a restore mints a fresh one.
+   * Lifetime: minted on the first start, reused across restarts and
+   * same-transport operator re-starts (so `wmux web --allow-host …` no longer
+   * locks out a paired phone), and destroyed on an explicit stop, new-token
+   * request, or encrypted/plaintext transport transition. The pairing code is
+   * deliberately NOT persisted — it is short-lived and single-use by design,
+   * so a restore mints a fresh one.
    */
   token: string;
+}
+
+/** In-memory load diagnostics that must never become part of web-state.json. */
+export interface WebStateLoadResult {
+  state: WebPersistedState;
+  /** A TLS field was malformed, or native TLS and Tailscale were both set. */
+  transportInvalid: boolean;
 }
 
 const STATE_FILE = 'web-state.json';
@@ -95,12 +106,12 @@ export function getWebStatePath(wmuxDir: string): string {
  * state file must never keep the daemon from booting, and the safe direction
  * for a serve-to-the-network toggle is off.
  */
-export function loadWebState(wmuxDir: string): WebPersistedState {
+export function loadWebStateWithDiagnostics(wmuxDir: string): WebStateLoadResult {
   let raw: string;
   try {
     raw = fs.readFileSync(getWebStatePath(wmuxDir), 'utf-8');
   } catch {
-    return { ...WEB_STATE_DISABLED };
+    return disabledLoadResult();
   }
 
   try {
@@ -109,10 +120,15 @@ export function loadWebState(wmuxDir: string): WebPersistedState {
       if (key === '__proto__' || key === 'constructor' || key === 'prototype') return undefined;
       return value;
     });
-    return coerceWebState(parsed);
+    return coerceWebStateWithDiagnostics(parsed);
   } catch {
-    return { ...WEB_STATE_DISABLED };
+    return disabledLoadResult();
   }
+}
+
+/** Read only the usable state when a caller does not need load diagnostics. */
+export function loadWebState(wmuxDir: string): WebPersistedState {
+  return loadWebStateWithDiagnostics(wmuxDir).state;
 }
 
 /**
@@ -126,7 +142,12 @@ export function loadWebState(wmuxDir: string): WebPersistedState {
  * whole change exists to prevent).
  */
 export function coerceWebState(parsed: unknown): WebPersistedState {
-  if (typeof parsed !== 'object' || parsed === null) return { ...WEB_STATE_DISABLED };
+  return coerceWebStateWithDiagnostics(parsed).state;
+}
+
+/** Coerce persisted state while retaining whether its transport was invalid. */
+export function coerceWebStateWithDiagnostics(parsed: unknown): WebStateLoadResult {
+  if (typeof parsed !== 'object' || parsed === null) return disabledLoadResult();
   const o = parsed as Record<string, unknown>;
 
   const port =
@@ -138,18 +159,52 @@ export function coerceWebState(parsed: unknown): WebPersistedState {
   const allowedHosts = Array.isArray(o['allowedHosts'])
     ? o['allowedHosts'].filter((h): h is string => typeof h === 'string' && h.trim() !== '')
     : [];
+  const tlsField = o['tls'];
+  const tls = coerceWebTlsConfig(tlsField);
+  const tlsIsValidOrAbsent = tlsField === undefined || tls !== undefined;
+  const tailscale = o['tailscale'] === true;
+  const transportInvalid = !tlsIsValidOrAbsent || (tailscale && tls !== undefined);
 
   return {
-    version: 1,
-    enabled: o['enabled'] === true && token !== '',
-    port,
-    host,
-    allowInput: o['allowInput'] === true,
-    allowUpload: o['allowUpload'] === true,
-    allowedHosts,
-    tailscale: o['tailscale'] === true,
-    token,
+    state: {
+      version: 1,
+      // A malformed TLS record must never restore as plaintext. Likewise, the
+      // current Tailscale front always proxies HTTP, so replaying both modes
+      // would produce an HTTPS backend the front cannot reach.
+      enabled: o['enabled'] === true && token !== '' && !transportInvalid,
+      port,
+      host,
+      allowInput: o['allowInput'] === true,
+      allowUpload: o['allowUpload'] === true,
+      ...(tls ? { tls } : {}),
+      allowedHosts,
+      tailscale,
+      token,
+    },
+    transportInvalid,
   };
+}
+
+function disabledLoadResult(): WebStateLoadResult {
+  return {
+    state: {
+      ...WEB_STATE_DISABLED,
+      allowedHosts: [...WEB_STATE_DISABLED.allowedHosts],
+    },
+    transportInvalid: false,
+  };
+}
+
+/** Validate persisted/RPC native-TLS paths without reading the PEM files. */
+export function coerceWebTlsConfig(value: unknown): WebTlsConfig | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  const o = value as Record<string, unknown>;
+  const certPath = typeof o['certPath'] === 'string' ? o['certPath'].trim() : '';
+  const keyPath = typeof o['keyPath'] === 'string' ? o['keyPath'].trim() : '';
+  if (!certPath || !keyPath || !path.isAbsolute(certPath) || !path.isAbsolute(keyPath)) {
+    return undefined;
+  }
+  return { certPath, keyPath };
 }
 
 /**

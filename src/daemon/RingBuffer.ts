@@ -1,4 +1,4 @@
-import { writeFile, rename, unlink } from 'node:fs/promises';
+import { writeFile, rename, unlink, appendFile, stat } from 'node:fs/promises';
 import {
   readFileSync,
   writeFileSync,
@@ -40,6 +40,21 @@ const RENAME_RETRY_BACKOFFS_MS = [20, 50, 100, 200]; // ≤ +370 ms, trivial vs 
 // (GLM P3: this is a doc clarification, not a gap).
 const dumpChains = new Map<string, Promise<void>>();
 
+// How far the dump file may grow past the ring's capacity before it is
+// compacted back down. The dump is append-first (see doDumpToFile): only the
+// bytes produced since the previous dump are written, so a tick that produced
+// 30 KB costs 30 KB instead of rewriting the whole multi-MB ring.
+//
+// Amplification works out to F/(F-1) of the output: at F = 2 the file grows by
+// one capacity worth of appends and is then rewritten once, so ~2 bytes on disk
+// per byse of terminal output. The full-rewrite-every-tick behaviour this
+// replaces cost capacity/output per tick — measured at ~112x on this repo's own
+// panes (30 s tick, 4 MiB ring, ~2.8 KB/s of actual output).
+//
+// Raising F lowers amplification further but leaves a larger file for recovery
+// to read back; 2 keeps the worst case at 8 MiB for the default 4 MiB ring.
+const DUMP_COMPACT_FACTOR = 2;
+
 /**
  * Fixed-size circular byte buffer for storing ConPTY output per session.
  * Preserves raw bytes including ANSI escape sequences without any filtering.
@@ -61,6 +76,15 @@ export class RingBuffer {
   private writePos: number;   // next write position (0..physical-1)
   private length: number;     // bytes currently stored (<= physical)
   private totalWritten: number; // monotonic lifetime count (used as byte offset for PromptEventLog)
+
+  // ── incremental dump bookkeeping ──────────────────────────────────────────
+  // Valid only for `dumpState.path`; any other destination, a clear(), or an
+  // on-disk size that no longer matches forces the next dump back to a full
+  // rewrite. Keeping the guard conservative matters more than keeping the
+  // append streak alive: this file is the crash-recovery substrate, and a
+  // wrong append silently corrupts scrollback whereas a needless rewrite only
+  // costs what the old code paid every tick anyway.
+  private dumpState: { path: string; totalWritten: number; fileBytes: number } | null = null;
 
   constructor(capacityBytes: number) {
     if (capacityBytes <= 0 || !Number.isInteger(capacityBytes)) {
@@ -167,11 +191,39 @@ export class RingBuffer {
     return Buffer.concat([tail, head]);
   }
 
+  /**
+   * Read the newest `n` stored bytes (oldest→newest within that slice).
+   *
+   * The incremental dump needs only the bytes produced since the last dump.
+   * Going through readAll() for that would copy the entire ring — which is the
+   * very cost this exists to avoid — so this walks the ring directly and
+   * copies just the tail.
+   */
+  readLast(n: number): Buffer {
+    const want = Math.min(n, this.length);
+    if (want <= 0) return Buffer.alloc(0);
+    if (this.length < this.physical) {
+      // Not wrapped: data lives at [0..length)
+      return Buffer.from(this.buffer.subarray(this.length - want, this.length));
+    }
+    // Wrapped: the newest byte sits just before writePos.
+    const start = (this.writePos - want + this.physical) % this.physical;
+    if (start + want <= this.physical) {
+      return Buffer.from(this.buffer.subarray(start, start + want));
+    }
+    const first = this.buffer.subarray(start, this.physical);
+    const second = this.buffer.subarray(0, want - first.length);
+    return Buffer.concat([first, second]);
+  }
+
   /** Clear the buffer, resetting all pointers and zeroing sensitive data. */
   clear(): void {
     this.buffer.fill(0);
     this.writePos = 0;
     this.length = 0;
+    // The dump file still holds the discarded history, so an append after a
+    // clear would concatenate two unrelated streams. Force a rewrite.
+    this.dumpState = null;
     // totalWritten is intentionally NOT reset — it represents the stream's
     // lifetime byte count, which PromptEventLog consumers may still hold
     // references to.
@@ -224,8 +276,65 @@ export class RingBuffer {
     }
   }
 
-  /** The actual tmp-write + atomic-rename, run inside the per-path chain. */
+  /**
+   * Append-first dump, run inside the per-path chain.
+   *
+   * The whole ring used to be rewritten on every snapshot tick. For a session
+   * at the ring ceiling that meant multi-MB of disk writes to persist a few KB
+   * of new output — measured at ~112x amplification on this repo's own panes,
+   * ~27 GB/day across eleven live PTYs, and it is also what the Windows AV
+   * handle-lock retry above exists to survive.
+   *
+   * So: write only what is new, and rewrite in full only when appending would
+   * be wrong or when the file has grown past DUMP_COMPACT_FACTOR x capacity.
+   *
+   * Appending is CORRECT because the dump file is only ever consumed as "the
+   * newest bytes of this stream": loadFromFile() feeds it straight into
+   * write(), which already keeps just the trailing `capacity` bytes when given
+   * more than it can hold. A file carrying extra history is therefore not a
+   * format change — it restores identically, and the surplus is bounded.
+   *
+   * Appending is SAFER than it looks against the crash that motivated tmp +
+   * rename. That guard protects readers from a partial FULL rewrite, where a
+   * tear can land anywhere and take the whole file with it. A torn append can
+   * only damage the bytes of the tick that was in flight, and the rest of the
+   * file — the entire prior scrollback — is already durable. The full-rewrite
+   * path keeps tmp + rename unchanged for the case where the whole file really
+   * is being replaced.
+   */
   private async doDumpToFile(filePath: string): Promise<void> {
+    const totalNow = this.totalWritten;
+    const st = this.dumpState;
+
+    if (st && st.path === filePath && totalNow > st.totalWritten) {
+      const delta = totalNow - st.totalWritten;
+      // delta > length: the ring dropped bytes we never dumped, so the tail no
+      // longer reconstructs the gap. Only a full rewrite is correct.
+      // fileBytes + delta over the ceiling: time to compact.
+      if (delta <= this.length &&
+          st.fileBytes + delta <= this.capacity * DUMP_COMPACT_FACTOR) {
+        // The file must still be exactly what we left behind. If anything else
+        // truncated, rotated or replaced it, appending would splice our bytes
+        // onto a stranger's — cheaper to check than to corrupt.
+        let onDisk = -1;
+        try {
+          onDisk = (await stat(filePath)).size;
+        } catch { /* missing/unreadable -> fall through to full rewrite */ }
+        if (onDisk === st.fileBytes) {
+          await appendFile(filePath, this.readLast(delta), { mode: 0o600 });
+          this.dumpState = {
+            path: filePath,
+            totalWritten: totalNow,
+            fileBytes: st.fileBytes + delta,
+          };
+          return;
+        }
+      }
+    }
+
+    // ── full rewrite (first dump, post-clear, gap, compaction, or a file that
+    // changed underneath us). Unchanged tmp + atomic rename semantics.
+    //
     // Captured here (inside the chain) rather than at enqueue time: a slightly
     // fresher snapshot is never wrong for recovery, and the snapshotRunner's
     // dirty-tracking captures totalBytesWritten BEFORE calling us, so a fresher
@@ -238,8 +347,14 @@ export class RingBuffer {
       await RingBuffer.renameWithRetry(tmpPath, filePath);
     } catch (err) {
       try { await unlink(tmpPath); } catch { /* tmp may already be gone */ }
+      // A failed rewrite leaves the destination in an unknown state — the old
+      // file may still be there, or the rename may have half-happened on a
+      // hostile FS. Drop the bookkeeping so the next dump cannot append onto
+      // an assumption we no longer hold.
+      this.dumpState = null;
       throw err;
     }
+    this.dumpState = { path: filePath, totalWritten: totalNow, fileBytes: data.length };
   }
 
   /**
@@ -274,6 +389,7 @@ export class RingBuffer {
    * the async path. Same tmp + rename invariants as {@link dumpToFile}.
    */
   dumpToFileSyncAtomic(filePath: string): void {
+    const totalNow = this.totalWritten;
     const data = this.readAll();
     const tmpPath = `${filePath}.tmp.${crypto.randomBytes(6).toString('hex')}`;
     try {
@@ -281,8 +397,14 @@ export class RingBuffer {
       renameSync(tmpPath, filePath);
     } catch (err) {
       try { unlinkSync(tmpPath); } catch { /* tmp may already be gone */ }
+      this.dumpState = null;
       throw err;
     }
+    // This path deliberately stays a full rewrite — it is the last-word write
+    // from the exit handler. Record the resulting state anyway so a daemon that
+    // somehow continues (a non-terminal exit hook, a test) appends from the
+    // right offset instead of silently splicing onto a stale length.
+    this.dumpState = { path: filePath, totalWritten: totalNow, fileBytes: data.length };
   }
 
   /** Create a RingBuffer pre-filled with data loaded from a file. */

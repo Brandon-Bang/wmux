@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
+  clearAtlasTexture,
   createAtlasGuard,
+  detectMerge,
   extractAtlas,
   GUARD_POLL_MS,
   GUARD_MARGIN_PAGES,
@@ -23,10 +25,84 @@ class FakeAtlas {
       this.pages[this.pages.length - 1].currentRow = { x: 0, y: 0 };
     }
   }
+  /** Set true to mirror the field behaviour where clearTexture does NOT take
+   *  effect (upstream early-returns unless _pages[0] is idle), so PREVENT
+   *  re-fires on every tick instead of being gated by the anti-thrash rule. */
+  clearIsNoop = false;
   clearTexture(): void {
     this.clearCalls++;
-    // Mirrors the real clearTexture: pages are emptied IN PLACE, count unchanged.
+    if (this.clearIsNoop) return;
+    // Faithful to upstream: it decides "already clean, nothing to do" by
+    // probing ONLY page 0, then empties every page IN PLACE (count unchanged).
+    if (this.pages.length > 0 && this.pages[0].currentRow.x === 0 && this.pages[0].currentRow.y === 0) {
+      this.skippedClears++;
+      return;
+    }
+    this.effectiveClears++;
     for (const p of this.pages) p.currentRow = { x: 0, y: 0 };
+  }
+  /** clearTexture calls that hit upstream's page-0 short-circuit. */
+  skippedClears = 0;
+  /** clearTexture calls that actually emptied the pool. */
+  effectiveClears = 0;
+  /** How the real pool grows: APPEND, every existing page object preserved. */
+  growBy(n: number): void {
+    for (let i = 0; i < n; i++) this.pages.push({ currentRow: { x: 0, y: 1 } });
+  }
+  /** Upstream's public page-removal event, fired from _deletePage. */
+  private removalListeners: Array<(canvas: unknown) => void> = [];
+  onRemoveTextureAtlasCanvas(listener: (canvas: unknown) => void): { dispose(): void } {
+    this.removalListeners.push(listener);
+    return { dispose: () => { this.removalListeners = []; } };
+  }
+  private fireRemoval(times: number): void {
+    for (let i = 0; i < times; i++) for (const l of this.removalListeners) l({});
+  }
+  /** A merge that consumes only pages appended since the last poll: the tail
+   *  grows, those new pages are merged away, and the pool regrows. Every index
+   *  the previous poll saw is untouched, so no polled signal can see it. */
+  mergeTailOnly(added: number, merged = 4): void {
+    this.growBy(added);
+    this.pages.splice(this.pages.length - merged, merged);
+    this.fireRemoval(merged);
+    this.pages.push({ currentRow: { x: 0, y: 1 } });
+    this.pages.push({ currentRow: { x: 0, y: 1 } });
+  }
+  /** Models addon-webgl's `_createNewPage` merge path exactly: the 4 selected
+   *  pages are DELETED and TWO are appended — the merged page, then the fresh
+   *  page the call was invoked for (that trailing push is unconditional). Net
+   *  -2, so only 2 reallocations are needed to hide the merge from a counter. */
+  mergePages(count = 4): void {
+    this.pages.splice(0, count);
+    this.pages.push({ currentRow: { x: 0, y: 1 } }); // merged page
+    this.pages.push({ currentRow: { x: 0, y: 1 } }); // the page the caller wanted
+  }
+  /** Put the pool in the observed field state: page 0 idle (refill resumed from
+   *  the tail after an earlier clear) while a later page holds glyphs. That is
+   *  the shape that makes upstream's probe short-circuit forever. */
+  lockOutClear(): void {
+    for (const p of this.pages) p.currentRow = { x: 0, y: 0 };
+    this.pages[this.pages.length - 1].currentRow = { x: 78, y: 480 };
+  }
+  anyPageInUse(): boolean {
+    return this.pages.some((p) => p.currentRow.x > 0 || p.currentRow.y > 0);
+  }
+  pagesInUse(): number {
+    return this.pages.filter((p) => p.currentRow.x > 0 || p.currentRow.y > 0).length;
+  }
+  /** What a pane's refresh() actually does to the pool: the re-raster allocates
+   *  from `_activePages[length - 1]`, so the LAST page is back in use before the
+   *  next poll — however thoroughly the clear emptied things. */
+  refillTail(): void {
+    if (this.pages.length > 0) this.pages[this.pages.length - 1].currentRow = { x: 17, y: 64 };
+  }
+  /** Genuinely near a merge — every page occupied EXCEPT page 0, which is the
+   *  one upstream's "already clean" probe reads. This is the state where both
+   *  defects bite at once: the gate should fire, and the clear must not
+   *  short-circuit. */
+  occupyAllButFirst(): void {
+    for (const p of this.pages) p.currentRow = { x: 12, y: 340 };
+    this.pages[0].currentRow = { x: 0, y: 0 };
   }
 }
 
@@ -80,13 +156,19 @@ describe('atlasGuard', () => {
     expect(pane.refreshes()).toBe(0);
   });
 
-  it('does not fire when the last page is empty (pool long but not refilled)', () => {
-    const atlas = new FakeAtlas(PREVENT_AT + 2, /* lastPageInUse */ false);
+  it('does not fire when the pool is long but mostly empty (the observed field state)', () => {
+    // 15 pages exist, 1 holds glyphs — measured live while the old gate was
+    // firing every poll. Nothing here is close to needing a new page, so a
+    // merge is not close either.
+    const atlas = new FakeAtlas(15, true);
+    atlas.lockOutClear(); // all idle except the tail
+    expect(atlas.pagesInUse()).toBe(1);
     const guard = createAtlasGuard();
     const pane = makePane(atlas);
     guard.register(pane.entry);
-    vi.advanceTimersByTime(GUARD_POLL_MS * 3);
+    vi.advanceTimersByTime(GUARD_POLL_MS * 5);
     expect(atlas.clearCalls).toBe(0);
+    expect(pane.refreshes()).toBe(0);
   });
 
   it('anti-thrash: after a PREVENT clear, does not refire until the pool refills end-to-end', () => {
@@ -116,6 +198,229 @@ describe('atlasGuard', () => {
     atlas.setPages(3, false); // merge deleted pages — count dropped 6 → 3
     vi.advanceTimersByTime(GUARD_POLL_MS);
     expect(atlas.clearCalls).toBe(1);
+    expect(pane.refreshes()).toBe(1);
+  });
+
+  it('CURE: catches a merge whose page count has already regrown before the next poll', () => {
+    // The blind spot a count-only signal has. A merge deletes 4 pages and
+    // appends 2 (the merged page and the fresh one the call wanted), a net -2;
+    // under the CJK burst that causes it those 2 are re-allocated well inside
+    // one 2s poll, so the count at both observed boundaries is identical and a
+    // drop is never seen. Stay far under PREVENT_AT so the only thing that can
+    // fire here is CURE.
+    const atlas = new FakeAtlas(6, /* lastPageInUse */ false);
+    const guard = createAtlasGuard();
+    const pane = makePane(atlas);
+    guard.register(pane.entry);
+    vi.advanceTimersByTime(GUARD_POLL_MS); // baseline: 6 pages
+    expect(atlas.clearCalls).toBe(0);
+
+    atlas.mergePages(4); // 6 → 4 (delete 4, add merged + new): net -2
+    atlas.growBy(2); // burst refills → 6 again, count unchanged across polls
+    expect(atlas.pages.length).toBe(6); // the count says nothing happened…
+
+    vi.advanceTimersByTime(GUARD_POLL_MS);
+    expect(atlas.clearCalls).toBe(1); // …but identity does
+    expect(pane.refreshes()).toBe(1);
+  });
+
+  it('CURE still detects a merge while PREVENT is firing on every tick', () => {
+    // The live failure mode on v3.38.6: upstream clearTexture returns early
+    // when _pages[0] is ALREADY idle, so the pool pressure never drops
+    // and PREVENT re-fires every poll — 305 consecutive `prevent — pages=14/16`
+    // with zero cure. A baseline DROPPED on each fire leaves `prev` undefined
+    // on every following tick, so the identity comparison never runs at all,
+    // precisely in the state where a merge is most likely. Re-snapshotting
+    // instead of dropping keeps CURE observable through a PREVENT storm.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const atlas = new FakeAtlas(PREVENT_AT, true);
+      atlas.clearIsNoop = true; // pressure never drops → PREVENT every tick
+      const guard = createAtlasGuard();
+      const pane = makePane(atlas);
+      guard.register(pane.entry);
+
+      // Only the guard's own verdict lines — a failed clear logs its own
+      // warning alongside them, which is not what this test is counting.
+      const verdicts = (): string[] =>
+        warn.mock.calls.map((c) => String(c[0])).filter((l) => /prevent|cure \(/.test(l));
+
+      vi.advanceTimersByTime(GUARD_POLL_MS * 3);
+      expect(verdicts().length).toBe(3);
+      expect(verdicts().every((l) => l.includes('prevent'))).toBe(true);
+
+      // A merge runs between two polls; the burst restores the count, so only
+      // identity can reveal it — and only if the baseline survived PREVENT.
+      const before = atlas.pages.length;
+      atlas.mergePages(4);
+      atlas.growBy(2);
+      expect(atlas.pages.length).toBe(before);
+
+      vi.advanceTimersByTime(GUARD_POLL_MS);
+      expect(verdicts().at(-1)).toContain('cure (merge detected: page-identity)');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('CURE: catches a merge confined to pages appended since the last poll', () => {
+    // Raised in review on #790. Baseline [1..6]; the burst appends 4 pages, the
+    // merge selects exactly those 4, and the pool regrows. Every index the
+    // previous poll saw is untouched and the count only went UP, so neither
+    // polled signal can see it — the page-removal event is the only witness.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const atlas = new FakeAtlas(6, /* lastPageInUse */ false);
+      const guard = createAtlasGuard();
+      const pane = makePane(atlas);
+      guard.register(pane.entry);
+      vi.advanceTimersByTime(GUARD_POLL_MS); // baseline
+      expect(atlas.clearCalls).toBe(0);
+      const before = atlas.pages.length;
+
+      atlas.mergeTailOnly(4);
+      expect(atlas.pages.length).toBeGreaterThan(before); // count only grew
+      // The polled signals are genuinely blind here — that is the point.
+      expect(detectMerge([1, 2, 3, 4, 5, 6], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])).toBeNull();
+
+      vi.advanceTimersByTime(GUARD_POLL_MS);
+      expect(atlas.clearCalls).toBe(1);
+      expect(pane.refreshes()).toBe(1);
+      expect(String(warn.mock.calls.at(-1)?.[0])).toContain('cure (merge detected: page-removed)');
+
+      // The latch is consumed: one merge yields one cure, not a stuck signal.
+      vi.advanceTimersByTime(GUARD_POLL_MS * 3);
+      expect(atlas.clearCalls).toBe(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('falls back to the polled signals when upstream exposes no removal event', () => {
+    const atlas = new FakeAtlas(6, /* lastPageInUse */ false);
+    (atlas as { onRemoveTextureAtlasCanvas?: unknown }).onRemoveTextureAtlasCanvas = undefined;
+    const guard = createAtlasGuard();
+    const pane = makePane(atlas);
+    guard.register(pane.entry);
+    vi.advanceTimersByTime(GUARD_POLL_MS);
+    atlas.mergePages(4);
+    atlas.growBy(2); // count restored — only identity can see this
+    vi.advanceTimersByTime(GUARD_POLL_MS);
+    expect(atlas.clearCalls).toBe(1);
+  });
+
+  it('does not fire CURE on pure growth (pages appended, none destroyed)', () => {
+    const atlas = new FakeAtlas(3, /* lastPageInUse */ false);
+    const guard = createAtlasGuard();
+    const pane = makePane(atlas);
+    guard.register(pane.entry);
+    vi.advanceTimersByTime(GUARD_POLL_MS);
+    atlas.growBy(2); // 3 → 5, still well under PREVENT_AT
+    vi.advanceTimersByTime(GUARD_POLL_MS);
+    atlas.growBy(2); // 5 → 7
+    vi.advanceTimersByTime(GUARD_POLL_MS);
+    expect(atlas.clearCalls).toBe(0);
+    expect(pane.refreshes()).toBe(0);
+  });
+
+  it('detectMerge: identity beats counting, and growth is not a merge', () => {
+    expect(detectMerge(undefined, [1, 2, 3])).toBeNull(); // no baseline yet
+    expect(detectMerge([1, 2, 3], [1, 2, 3, 4])).toBeNull(); // appended
+    expect(detectMerge([1, 2, 3], [1, 2])).toBe('count-drop'); // still shrunk
+    // Merge + regrowth: same length, different pages at seen indices.
+    expect(detectMerge([1, 2, 3, 4, 5, 6], [7, 5, 6, 8, 9, 10])).toBe('page-identity');
+    // Untaggable pool (every tag 0) degrades to length-only, never a false CURE.
+    expect(detectMerge([0, 0, 0], [0, 0, 0, 0])).toBeNull();
+    expect(detectMerge([0, 0, 0], [0, 0])).toBe('count-drop');
+  });
+
+  it('clearAtlasTexture: defeats the page-0 short-circuit that makes clearing a permanent no-op', () => {
+    // Field state on v3.38.6: page 0 idle, one late page holding glyphs, count
+    // pinned at the cap. Upstream's probe reads page 0, concludes "already
+    // clean" and returns — forever.
+    const atlas = new FakeAtlas(15, true);
+    atlas.lockOutClear();
+    expect(atlas.anyPageInUse()).toBe(true);
+
+    // Baseline: calling upstream directly is a no-op in this state.
+    atlas.clearTexture();
+    expect(atlas.skippedClears).toBe(1);
+    expect(atlas.anyPageInUse()).toBe(true); // pressure did NOT drop
+
+    // Through clearAtlasTexture it takes effect and the postcondition holds.
+    expect(clearAtlasTexture(atlas)).toBe('cleared');
+    expect(atlas.effectiveClears).toBe(1);
+    expect(atlas.anyPageInUse()).toBe(false);
+    expect(atlas.pages[0].currentRow).toEqual({ x: 0, y: 0 }); // nudge not left behind
+  });
+
+  it('clearAtlasTexture: reports already-clean without calling upstream, and unavailable on a reshaped atlas', () => {
+    const clean = new FakeAtlas(4, false);
+    for (const p of clean.pages) p.currentRow = { x: 0, y: 0 };
+    expect(clearAtlasTexture(clean)).toBe('already-clean');
+    expect(clean.clearCalls).toBe(0);
+
+    expect(clearAtlasTexture({ pages: [], clearTexture: () => undefined })).toBe('unavailable');
+    expect(clearAtlasTexture({ pages: [{ currentRow: { x: 1, y: 0 } }] })).toBe('unavailable');
+  });
+
+  it('clearAtlasTexture: rolls the nudge back and reports failure when the clear does not take', () => {
+    const atlas = new FakeAtlas(5, true);
+    atlas.lockOutClear();
+    atlas.clearTexture = () => { /* upstream reshaped into a no-op */ };
+    expect(clearAtlasTexture(atlas)).toBe('failed');
+    expect(atlas.pages[0].currentRow).toEqual({ x: 0, y: 0 }); // no residue
+  });
+
+  it('PREVENT does not re-arm when refresh() puts the tail page straight back in use', () => {
+    // Raised in review: making the clear effective is not enough on its own.
+    // Every pane's refresh() re-rasters immediately, and allocation resumes
+    // from `_activePages[length - 1]`, so the LAST page is in use again before
+    // the next poll. A gate that reads the last page therefore re-arms every
+    // 2s no matter how well the clear worked — and now each iteration pays for
+    // a real atlas wipe plus an all-pane re-raster, which is worse than the
+    // no-op loop it replaced. Occupancy is what has to fall, and it does.
+    const atlas = new FakeAtlas(PREVENT_AT, true);
+    const guard = createAtlasGuard();
+    // Model the real feedback loop: refreshing a pane refills the tail page.
+    const pane = {
+      getAddon: () => addonFor(atlas),
+      refresh: () => { refreshes++; atlas.refillTail(); },
+    };
+    let refreshes = 0;
+    guard.register(pane);
+
+    vi.advanceTimersByTime(GUARD_POLL_MS);
+    expect(atlas.effectiveClears).toBe(1);
+    expect(atlas.pagesInUse()).toBe(1); // cleared, then the tail came straight back
+
+    // The tail IS in use again — the old gate's condition is satisfied — but
+    // occupancy is 1 of 12, so nothing fires.
+    vi.advanceTimersByTime(GUARD_POLL_MS * 10);
+    expect(atlas.effectiveClears).toBe(1);
+    expect(refreshes).toBe(1);
+  });
+
+  it('PREVENT stops thrashing once the clear actually empties the pool', () => {
+    // Both defects in one state: the pool IS genuinely near a merge (occupancy
+    // 14 of 15) so PREVENT must fire, and page 0 is the idle one so upstream's
+    // probe would short-circuit the clear. Before, that produced the
+    // 4657-events-a-day loop — fire, no-op, pool still full, fire again.
+    const atlas = new FakeAtlas(15, true);
+    atlas.occupyAllButFirst();
+    expect(atlas.pagesInUse()).toBe(14); // occupancy over the threshold
+    const guard = createAtlasGuard();
+    const pane = makePane(atlas);
+    guard.register(pane.entry);
+
+    vi.advanceTimersByTime(GUARD_POLL_MS);
+    expect(atlas.skippedClears).toBe(0); // the short-circuit was defeated…
+    expect(atlas.effectiveClears).toBe(1); // …so the clear took effect…
+    expect(atlas.anyPageInUse()).toBe(false); // …and the pressure dropped
+
+    // …so the anti-thrash gate engages: no further firing while occupancy is low.
+    vi.advanceTimersByTime(GUARD_POLL_MS * 5);
+    expect(atlas.effectiveClears).toBe(1);
     expect(pane.refreshes()).toBe(1);
   });
 

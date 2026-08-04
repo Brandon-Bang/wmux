@@ -1184,11 +1184,27 @@ export function useTerminal(containerRef: React.RefObject<HTMLDivElement | null>
       fitAddon.fit();
     }
 
-    // Wait for fonts to fully load, then rebuild the WebGL glyph atlas.
-    // font-display:swap causes the browser to render with a fallback font first,
-    // so the WebGL atlas may contain glyphs measured with wrong metrics.
-    // A simple refresh() doesn't rebuild the atlas — we must dispose and
-    // recreate the WebGL addon to force a full atlas rebuild.
+    // Wait for fonts to fully load, then rebuild the WebGL glyph atlas AND
+    // re-fit — including the resize that tells the PTY.
+    //
+    // font-display:swap makes the browser paint with a fallback font first, so
+    // the initial fit() above measures the WRONG cell width. On Windows the
+    // fallback (Consolas) is narrower than the bundled JetBrains Mono, so the
+    // pre-font fit over-counts columns — 56 measured where only 49 fit. The
+    // terminal then paints a grid wider than its container and the overflow is
+    // clipped: every line silently loses its tail, mid-glyph, with no error.
+    //
+    // Rebuilding the atlas alone does not fix that, and neither does a bare
+    // fitAddon.fit() here: fit() corrects the VIEW but never sends the new
+    // dimensions to the PTY, so the shell keeps wrapping at the fallback-derived
+    // width for the rest of the session. sendResize lives only in runFit(), and
+    // its only trigger is a real container resize — which is why restarting the
+    // app never helps (the same race just replays) while nudging the window
+    // does. Route through runFit() for the same reason #747 extracted it: a
+    // thinner copy of this path drifts out of sync with it.
+    //
+    // runFit is declared below; this callback only runs once the fonts promise
+    // settles, which is a later task than this effect body.
     document.fonts.ready.then(() => {
       if (!terminalRef.current || terminalRef.current !== terminal) return;
       if (container.offsetWidth === 0 || container.offsetHeight === 0) return;
@@ -1201,15 +1217,11 @@ export function useTerminal(containerRef: React.RefObject<HTMLDivElement | null>
         webglAddonRef.current = null;
         loadWebgl();
       }
-      // Selection-preservation guard — this is mostly defensive (fonts.ready
-      // resolves on mount before the user can select anything), but pinning
-      // the contract here prevents future regressions if anything triggers
-      // a font load mid-session.
-      if (!claimFit(terminalRef.current, pendingFitRef)) {
-        console.debug('[Terminal] fonts.ready fit deferred — active selection');
-        return;
-      }
-      fitAddon.fit();
+      // runFit() carries the identity, zero-dimension and selection guards, the
+      // scroll-position preservation and the sendResize. A deferred fit is not
+      // lost either: claimFit() records the debt and the selection-release
+      // retry replays it.
+      runFit();
       terminal.refresh(0, terminal.rows - 1);
     });
 

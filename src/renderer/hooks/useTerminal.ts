@@ -1174,6 +1174,16 @@ export function useTerminal(containerRef: React.RefObject<HTMLDivElement | null>
           // terminal may already be disposed
         }
       },
+      // Drops this pane's renderer model as well, which refresh() cannot do.
+      // Required for the rebuild to actually cure a corrupted pane rather than
+      // just repaint it from stale texture coordinates — see AtlasGuardEntry.
+      clearAtlas: () => {
+        try {
+          terminal.clearTextureAtlas();
+        } catch {
+          // terminal may already be disposed
+        }
+      },
     });
 
     // Only fit immediately if the container is actually visible (non-zero size).

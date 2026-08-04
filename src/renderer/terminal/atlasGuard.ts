@@ -109,6 +109,26 @@ export interface AtlasGuardEntry {
   getAddon(): unknown;
   /** Full-range terminal.refresh for this pane. */
   refresh(): void;
+  /**
+   * `terminal.clearTextureAtlas()` for this pane, when the caller can provide
+   * it. Optional so an entry registered without it still works.
+   *
+   * WHY THIS EXISTS, and why refresh() alone is not enough:
+   * xterm shares ONE TextureAtlas across same-config terminals, but each pane's
+   * WebGL renderer keeps its OWN cell->texture-coordinate model. Emptying the
+   * shared atlas invalidates those coordinates for every pane, yet only the
+   * pane that happens to draw next rebuilds its model — the others keep
+   * sampling rectangles that now hold different glyphs. The grid, borders and
+   * cursor stay correct while the CHARACTERS come out wrong, which is exactly
+   * the artifact users report.
+   *
+   * refresh() cannot fix that: it repaints from the model it already has. Only
+   * clearTextureAtlas() discards the renderer model as well, which is why it is
+   * the one intervention measured to actually restore a corrupted pane
+   * (2026-08-05: refresh-all on 7 panes left the screen garbled; per-pane
+   * clearTextureAtlas restored 7/7).
+   */
+  clearAtlas?(): void;
 }
 
 export interface AtlasGuardOptions {
@@ -365,6 +385,17 @@ export function createAtlasGuard(options: AtlasGuardOptions = {}): AtlasGuard {
       console.warn('[wmux:atlas-guard] clear did not take effect — pool pressure will not drop');
     }
     for (const entry of group) {
+      try {
+        // Discard this pane's cached cell->texture-coordinate model BEFORE
+        // repainting. Without it the pane repaints from a model whose
+        // coordinates point into an atlas that no longer holds those glyphs,
+        // which is the corruption this rebuild is supposed to cure — the pane
+        // comes back looking repaired only if it happened to be the one that
+        // re-rastered. See AtlasGuardEntry.clearAtlas.
+        entry.clearAtlas?.();
+      } catch {
+        // pane may be disposing — the next tick simply won't see it
+      }
       try {
         entry.refresh();
       } catch {

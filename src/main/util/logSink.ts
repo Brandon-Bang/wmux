@@ -10,6 +10,7 @@
  * This sink:
  *   - tees process.stderr.write to a daily-rotated log file in
  *     `app.getPath('logs')` (Windows: %APPDATA%\wmux\logs\main-YYYY-MM-DD.log)
+ *   - caps each file at 16 MiB and keeps three numbered archives
  *   - exposes `logLine(level, source, message)` for explicit instrumentation
  *
  * Best-effort: every write is wrapped in try/catch. The sink must never
@@ -19,6 +20,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { app } from 'electron';
+import { BoundedLogWriter, createResilientTee, type TeeStream } from '../../shared/logTransport';
+
+export {
+  BoundedLogWriter,
+  createResilientTee,
+  isBrokenPipeError,
+  MAX_LOG_ARCHIVES,
+  MAX_LOG_FILE_BYTES,
+} from '../../shared/logTransport';
 
 type Level = 'info' | 'warn' | 'error';
 
@@ -70,6 +80,32 @@ function resolveLogPath(): string | null {
   return currentLogPath;
 }
 
+const boundedLogWriter = new BoundedLogWriter();
+
+function mirrorToFile(chunk: unknown): void {
+  const filePath = resolveLogPath();
+  if (!filePath) return;
+  const data = typeof chunk === 'string'
+    ? chunk
+    : (chunk instanceof Uint8Array ? chunk : String(chunk));
+  boundedLogWriter.append(filePath, data);
+}
+
+/**
+ * True once the tee is installed and consumes stdio `error` events itself.
+ *
+ * The global exception handlers suppress broken-pipe errors only while this is
+ * false. Before init nothing is listening, so an EPIPE from stdout/stderr
+ * escapes as an uncaughtException and reporting it would write back to the pipe
+ * that just failed. After init that error never reaches the handlers at all, so
+ * anything still arriving with EPIPE/EBADF came from somewhere else — an
+ * application socket, a file stream — and must be reported normally rather than
+ * classified as a dead console by its error code alone.
+ */
+export function stdioErrorsConsumed(): boolean {
+  return initialised;
+}
+
 /**
  * Append a structured log line. Writes to stderr only — the file write is
  * handled automatically by the stderr tee installed in `initLogSink()`,
@@ -96,59 +132,12 @@ export function initLogSink(): void {
   if (initialised) return;
   initialised = true;
 
-  // Reentrancy guard. Without this, an EPIPE thrown by `orig()` below
-  // becomes an `uncaughtException`, the registered handler logs via
-  // `console.error`, which routes back through *this* override — and
-  // EPIPE re-throws on the same broken pipe. Within ~17 minutes that
-  // grew the log file to 692 MB on a packaged Windows GUI build where
-  // process.stderr is connected to a parent that no longer exists.
-  //
-  // The flag is checked synchronously inside the override; we never
-  // await between set and clear, so single-threadedness of the JS event
-  // loop is sufficient to prevent the recursion.
-  let writing = false;
-
-  function makeTee(stream: NodeJS.WriteStream): typeof stream.write {
-    const orig = stream.write.bind(stream);
-    return ((chunk: unknown, ...rest: unknown[]) => {
-      if (writing) {
-        // Recursive entry — drop silently. The outer call already wrote
-        // the original chunk to the file and is in the middle of the
-        // orig() pass-through.
-        return true;
-      }
-      writing = true;
-      try {
-        try {
-          const filePath = resolveLogPath();
-          if (filePath) {
-            const str = typeof chunk === 'string'
-              ? chunk
-              : (chunk instanceof Uint8Array ? Buffer.from(chunk).toString('utf-8') : String(chunk));
-            // appendFileSync writes through to the OS immediately and fsyncs
-            // before returning. createWriteStream would buffer until 16KB
-            // high-water-mark — for a long-lived main with small log lines
-            // that means the file sits at 0 bytes on disk for the whole
-            // session, defeating the postmortem use case entirely.
-            fs.appendFileSync(filePath, str);
-          }
-        } catch { /* swallow — never break stderr */ }
-
-        // Pass through to the original stream. Wrapped in its own
-        // try/catch because in packaged Windows GUI builds the inherited
-        // pipe handle can be a closed pipe — orig() then throws EPIPE,
-        // which propagates to the caller and becomes uncaughtException.
-        // Catching keeps the log-tee one-way and isolates the "useful"
-        // file write from a busted host stream.
-        try {
-          // @ts-expect-error - spread re-applies original signature
-          return orig(chunk, ...rest);
-        } catch {
-          return true;
-        }
-      } finally {
-        writing = false;
-      }
+  function makeTee(stream: NodeJS.WriteStream, label: string): typeof stream.write {
+    return createResilientTee(stream as unknown as TeeStream, mirrorToFile, {
+      label,
+      // The notice bypasses logLine()/console entirely — it exists to explain a
+      // stream that just failed, so it must not be routed through that stream.
+      notice: mirrorToFile,
     }) as typeof stream.write;
   }
 
@@ -157,8 +146,8 @@ export function initLogSink(): void {
   // never made it to disk — invisible postmortem for the most common
   // logging call. console.warn / console.error / process.stderr.write
   // still go through stderr as before.
-  process.stderr.write = makeTee(process.stderr);
-  process.stdout.write = makeTee(process.stdout);
+  process.stderr.write = makeTee(process.stderr, 'stderr');
+  process.stdout.write = makeTee(process.stdout, 'stdout');
 
   // Auto-prune old daily log files. Bounded sync I/O at startup; errors
   // swallowed so logging can never crash the main process.
@@ -178,7 +167,7 @@ function pruneOldLogs(retentionDays: number): void {
     if (!fs.existsSync(dir)) return;
     const cutoffMs = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
     for (const file of fs.readdirSync(dir)) {
-      if (!/^main-\d{4}-\d{2}-\d{2}\.log$/.test(file)) continue;
+      if (!/^main-\d{4}-\d{2}-\d{2}\.log(?:\.\d+)?$/.test(file)) continue;
       const full = path.join(dir, file);
       try {
         const st = fs.statSync(full);

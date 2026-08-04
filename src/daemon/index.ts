@@ -57,7 +57,7 @@ import { createSnapshotRunner } from './snapshotRunner';
 import { RingBuffer } from './RingBuffer';
 import { GitContextWatcher } from '../main/pty/gitContextWatch';
 import { PortWatcher } from '../main/pty/portWatch';
-import { initDaemonLogSink } from './util/logSink';
+import { initDaemonLogSink, isBrokenPipeError, stdioErrorsConsumed } from './util/logSink';
 import type { DaemonState } from './types';
 import type { DaemonEvent, DaemonCreateSessionParams, DaemonSessionIdParams, DaemonResizeParams, DaemonSetResumeBindingParams } from '../shared/rpc';
 import { randomUUID } from 'node:crypto';
@@ -5729,6 +5729,12 @@ async function main(): Promise<void> {
   const MAX_TRACKED_ERRORS = 50;
 
   process.on('uncaughtException', (err) => {
+    // Never report a broken inherited stdio pipe: log() writes via console,
+    // which is the pipe that just failed. Only before initDaemonLogSink()
+    // installs its listeners — after that the tee consumes those errors, so a
+    // broken-pipe code arriving here belongs to some other stream and must take
+    // the normal path (including the repeated-exception shutdown below).
+    if (!stdioErrorsConsumed() && isBrokenPipeError(err)) return;
     log('error', 'Uncaught exception:', err);
 
     // Fatal system errors — shutdown immediately
@@ -5764,6 +5770,7 @@ async function main(): Promise<void> {
     }
   });
   process.on('unhandledRejection', (reason) => {
+    if (!stdioErrorsConsumed() && isBrokenPipeError(reason)) return;
     log('error', 'Unhandled rejection:', reason);
   });
 
